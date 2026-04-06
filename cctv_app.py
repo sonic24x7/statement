@@ -1,0 +1,2290 @@
+"""
+cctv_app.py  (v6.1 — email feature added)
+================================================
+Changes from v6:
+- Gmail SMTP email feature: send statement as .docx attachment
+- Recipient built from name input + domain dropdown
+- Domains: @rotherham.gov.uk / @southyorkshire.police.uk
+- Email button appears in success box after statement is generated
+- Temp file used to hold docx between generation and send — no re-generation
+- Gmail credentials stored in .env file (GMAIL_USER, GMAIL_APP_PASSWORD)
+
+Changes from v5:
+- Site reference auto-grabbed from server hostname (socket.gethostname())
+- Removed Wasabi Cloud Storage; added Raw Data (USB/Hard Drive) option
+- Added Flare Reference field to incident reference section
+- Camera mounting position pre-filled as Lamp Post with number prompt
+- In-person handover: custody disclaimer added to form and statement
+- Complete Later: wet ink workflow paragraph added to statement
+- FOI pipeline: separate audit/registry Word document generated
+- Visual improvements to Word document output
+- DEMS only for electronic transfers (Wasabi removed throughout)
+
+Install:
+    python3 -m venv /opt/CCTV_Statement/venv
+    /opt/CCTV_Statement/venv/bin/pip install flask python-docx requests
+
+.env file must contain:
+    ANTHROPIC_API_KEY=sk-ant-...
+    GMAIL_USER=rmbcvms@gmail.com
+    GMAIL_APP_PASSWORD=your-16-char-app-password
+
+Run:
+    /opt/CCTV_Statement/venv/bin/python3 cctv_app.py
+
+Access:
+    http://0.0.0.0:5000
+"""
+
+import os, io, uuid, socket, sqlite3, hashlib, secrets, requests, smtplib, tempfile
+from datetime import datetime, timezone
+from functools import wraps
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
+from flask import Flask, render_template_string, request, redirect, url_for, session, send_file, jsonify
+from docx import Document
+from docx.shared import Pt, Inches, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)
+
+NX_SQLITE          = "/opt/networkoptix/mediaserver/var/mserver.sqlite"
+CLAUDE_API_URL     = "https://api.anthropic.com/v1/messages"
+CLAUDE_MODEL       = "claude-sonnet-4-6"
+ANTHROPIC_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")
+GMAIL_USER         = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+
+# Temp file store: token → (filepath, filename)
+_TEMP_DOCS: dict = {}
+
+# ── Auto site reference from hostname ─────────────────────────────────────────
+def get_site_ref():
+    try:
+        hn = socket.gethostname().upper().split(".")[0]
+        return hn
+    except Exception:
+        return "RMBC-UNKNOWN"
+
+SITE_REF = get_site_ref()
+
+USERS = {
+    "dane.plant": {"hash": hashlib.sha256(b"Cctv2026!").hexdigest(),  "name": "Dane Plant",    "role": "CCTV Engineer",  "initials": "DP"},
+    "admin":      {"hash": hashlib.sha256(b"Admin2026!").hexdigest(), "name": "Administrator", "role": "CCTV Manager",   "initials": "AD"},
+}
+
+LOCATIONS = [
+    "Rawmarsh Police Station, Green Lane, Rawmarsh, Rotherham, S62 6JU",
+    "Riverside House, Main Street, Rotherham, S60 1AE",
+]
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "username" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+def check_password(username, password):
+    user = USERS.get(username)
+    if not user: return False
+    return user["hash"] == hashlib.sha256(password.encode()).hexdigest()
+
+# ── SQLite ────────────────────────────────────────────────────────────────────
+
+def get_bookmarks():
+    try:
+        con = sqlite3.connect(NX_SQLITE)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT record_id, start_time, duration, name, description, created FROM bookmarks WHERE duration > 0 ORDER BY start_time DESC LIMIT 50")
+        rows = [dict(r) for r in cur.fetchall()]
+        con.close()
+        for r in rows:
+            s = datetime.fromtimestamp(r["start_time"] / 1000, tz=timezone.utc)
+            e = datetime.fromtimestamp((r["start_time"] + r["duration"]) / 1000, tz=timezone.utc)
+            d = r["duration"] / 1000
+            r["start_fmt"]    = s.strftime("%d/%m/%Y %H:%M:%S")
+            r["end_fmt"]      = e.strftime("%d/%m/%Y %H:%M:%S")
+            r["duration_fmt"] = f"{int(d//60)}m {int(d%60)}s"
+        return rows
+    except Exception as e:
+        print(f"SQLite error: {e}"); return []
+
+def get_bookmark(record_id):
+    try:
+        con = sqlite3.connect(NX_SQLITE)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT record_id, hex(guid) as guid, start_time, duration, name, description, created FROM bookmarks WHERE record_id=?", (record_id,))
+        r = dict(cur.fetchone()); con.close()
+        s = datetime.fromtimestamp(r["start_time"] / 1000, tz=timezone.utc)
+        e = datetime.fromtimestamp((r["start_time"] + r["duration"]) / 1000, tz=timezone.utc)
+        d = r["duration"] / 1000
+        r["start_dt"] = s; r["end_dt"] = e
+        r["start_fmt"]    = s.strftime("%d/%m/%Y %H:%M:%S")
+        r["end_fmt"]      = e.strftime("%d/%m/%Y %H:%M:%S")
+        hours = int(d // 3600)
+        mins  = int((d % 3600) // 60)
+        secs  = int(d % 60)
+        if hours > 0:
+            r["duration_fmt"] = f"{hours} hours, {mins} minutes and {secs} seconds"
+        else:
+            r["duration_fmt"] = f"{mins} minutes and {secs} seconds"
+        r["created_fmt"]  = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%H:%M:%S on %d/%m/%Y") if r.get("created") else "Unknown"
+        r["created_time"] = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%H:%M:%S") if r.get("created") else ""
+        r["created_date"] = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%d/%m/%Y") if r.get("created") else ""
+        return r
+    except Exception as e:
+        print(f"SQLite error: {e}"); return None
+
+# ── Claude — Witness Statement ────────────────────────────────────────────────
+
+def generate_statement(bm, form, download_time):
+
+    # Reference line
+    ref_parts = []
+    if form.get("crime_name"):   ref_parts.append(form["crime_name"])
+    if form.get("crime_number"): ref_parts.append(f"crime reference {form['crime_number']}")
+    if form.get("flare_ref"):    ref_parts.append(f"Flare reference {form['flare_ref']}")
+    if form.get("foi_ref"):      ref_parts.append(f"FOI reference {form['foi_ref']}")
+    ref_line = " / ".join(ref_parts) if ref_parts else None
+
+    # Bookmark creator
+    bookmark_creator = form.get("bookmark_creator", "").strip()
+    witness_name_val = form.get("witness_name", "").strip()
+    creator_phrase = "I" if (not bookmark_creator or bookmark_creator == witness_name_val) else bookmark_creator
+
+    # Clock narrative
+    clock_date      = form.get("clock_check_date", download_time.strftime("%d/%m/%Y"))
+    bt_time         = form.get("bt_clock_time", "")
+    nvr_time        = form.get("nvr_clock_time", "")
+    clock_diff      = form.get("clock_difference", "")
+    clock_fast_slow = form.get("clock_fast_slow", "fast")
+
+    if form.get("clock_checked") == "yes" and bt_time and nvr_time:
+        if clock_fast_slow == "accurate":
+            clock_conclusion = "showing the system time to be correct."
+        elif clock_fast_slow == "fast":
+            clock_conclusion = f"showing the system time to be approximately {clock_diff} fast."
+        else:
+            clock_conclusion = f"showing the system time to be approximately {clock_diff} slow."
+        clock_para = (
+            f"On {clock_date} I checked the NVR system clock against the BT Speaking Clock. "
+            f"At {bt_time} on the BT Speaking Clock, the NVR system displayed {nvr_time}, "
+            f"{clock_conclusion}"
+        )
+    else:
+        clock_para = (
+            "I was unable to verify the NVR system clock against the BT Speaking Clock at the time "
+            "of this statement. The investigating officer should treat all timestamps as approximate "
+            "and confirm NTP synchronisation status with the CCTV team."
+        )
+
+    # Export
+    export_date = form.get("export_date", download_time.strftime("%d/%m/%Y"))
+    export_time = form.get("export_time", download_time.strftime("%H:%M:%S"))
+    exhibit_ref = form.get("exhibit_ref", "DCP1")
+    media_type  = form.get("media_type", "DVD disc")
+    is_dems     = media_type == "South Yorkshire Police DEMS Portal"
+    secure_store = "Rawmarsh Police Station, Green Lane, Rawmarsh, Rotherham"
+
+    export_para = (
+        f"On {export_date} at {export_time} I exported the bookmarked footage from the Nx Witness system. "
+        f"The footage was exported in MP4 format and saved to the following transferable media: {media_type}. "
+        f"The footage was assigned exhibit reference {exhibit_ref}."
+    )
+
+    # Handover — all pipeline types
+    handover_type = form.get("handover_type", "storage")
+
+    if handover_type == "person":
+        officer_name   = form.get("officer_name", "").strip() or "______________________"
+        officer_number = form.get("officer_number", "").strip() or "______________________"
+        h_location     = form.get("handover_location", "").strip() or "______________________"
+        h_date         = form.get("handover_date", "").strip() or "______________________"
+        h_time         = form.get("handover_time", "").strip() or "______________________"
+        h_time_fmt = h_time if h_time else "__ : __ Hrs"
+        handover = (
+            f"On {h_date} at {h_time_fmt}, exhibit {exhibit_ref} was handed to {officer_name}, "
+            f"collar number {officer_number}, at {h_location}."
+        )
+
+    elif handover_type == "dems":
+        eu_date  = form.get("electronic_date", "").strip() or "__ / __ / _____"
+        eu_time  = form.get("electronic_time", "").strip() or "__ : __ Hrs"
+        eu_by    = form.get("electronic_by",   "").strip() or form.get("witness_name", "______________________")
+        eu_recip = form.get("electronic_recipient", "").strip() or "______________________"
+        eu_ref   = form.get("electronic_ref",  "").strip() or "______________________"
+        handover = (
+            f"The footage was uploaded to the South Yorkshire Police Digital Evidence Management System (DEMS)\n"
+            f"- Date of upload: {eu_date}\n"
+            f"- Time of upload: {eu_time}\n"
+            f"- Uploaded by: {eu_by}\n"
+            f"- Requester Details: {eu_recip}\n"
+            f"- DEMS reference: {eu_ref}"
+        )
+
+    elif handover_type == "casefile":
+        cf_ref    = form.get("casefile_ref", "").strip() or "______________________"
+        cf_system = form.get("casefile_system", "Flare").strip()
+        handover = (
+            f"Exhibit {exhibit_ref} has been stored on the {cf_system}. "
+            f"Internal case file reference: {cf_ref}."
+        )
+
+    else:
+        # Secure storage locker
+        handover = (
+            f"Exhibit {exhibit_ref} has been placed into the secure CCTV storage locker at {secure_store}, "
+            f"awaiting collection. Handover details to be completed on collection:\n"
+            f"- Officer name: ______________________\n"
+            f"- Officers station: ______________________\n"
+            f"- Collar / warrant number: ______________________\n"
+            f"- Date and time of collection: __ / __ / _____ at __ : __ Hrs\n"
+            f"- Location of handover: ______________________"
+        )
+
+    prompt = f"""You are producing a short, factual MG11 technical CCTV witness statement for a CCTV engineer at Rotherham Metropolitan Borough Council.
+
+STRICT RULES:
+- Plain, professional English — NOT overly formal or legalistic
+- Maximum 7 short paragraphs, NO headings or titles between paragraphs
+- First person, past tense
+- The engineer does NOT describe what happened in the footage — technical witness only
+- Use the EXACT wording provided below for system description, bookmark creation, clock check, export, storage and handover — do not rephrase or summarise
+- Do NOT add bold text, section labels, or any headings — plain flowing paragraphs only
+- End with the Section 9 CJA 1967 declaration
+
+STRUCTURE:
+Para 1 — Who I am, my role, where I am currently based, purpose of this statement{f' in relation to: {ref_line}' if ref_line else ''}
+Para 2 — The CCTV system and camera (USE VERBATIM TEXT BELOW)
+Para 3 — How the footage was identified; who created the bookmark (USE VERBATIM BOOKMARK TEXT BELOW)
+Para 4 — Clock check (USE VERBATIM TEXT BELOW)
+Para 5 — Export and handover (USE VERBATIM EXPORT & HANDOVER TEXT BELOW — reproduce exactly including all bullet lines)
+Para 6 — Section 9 CJA 1967 declaration
+
+=== WITNESS ===
+Name: {form.get('witness_name')}
+Role: {form.get('witness_role')}
+Organisation: Rotherham Metropolitan Borough Council
+Currently based at: {form.get('witness_base')}
+Contact: {form.get('witness_contact')}
+Date of statement: {form.get('statement_date')}
+
+=== INCIDENT ===
+Start: {bm.get('start_fmt')}
+End: {bm.get('end_fmt')}
+Duration: {bm.get('duration_fmt')}
+Bookmark name: {bm.get('name')}
+Bookmark created: {bm.get('created_fmt')}
+
+=== SYSTEM DESCRIPTION — VERBATIM ===
+The CCTV system at this location is referenced as {SITE_REF}. The system is owned and operated by Rotherham Metropolitan Borough Council and comprises networked Hikvision cameras integrated with the Nx Witness video management system developed by Network Optix. At the time of review, the system was operating on software version 6.1.0.42176.
+The footage referred to in this statement was captured by a camera installed on {form.get('camera_location', 'Lamp Post')} at {form.get('incident_location', 'the above location')}.
+
+=== BOOKMARK CREATION — VERBATIM ===
+{creator_phrase} created a bookmark within the system named "{bm.get('name')}" at {bm.get('created_time')} on {bm.get('created_date')} to preserve the relevant footage for export.
+
+=== CLOCK CHECK — VERBATIM ===
+{clock_para}
+
+=== EXPORT & HANDOVER — VERBATIM, REPRODUCE EXACTLY ===
+{export_para}
+
+{handover}"""
+
+    headers = {
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": CLAUDE_MODEL,
+        "max_tokens": 2000,
+        "system": "You produce short factual UK MG11 technical CCTV witness statements. Plain professional English. Maximum 7 paragraphs. No footage description. Reproduce verbatim sections exactly as provided.",
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    r = requests.post(CLAUDE_API_URL, headers=headers, json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()["content"][0]["text"]
+
+# ── FOI Audit Document — data assembler (no AI — deterministic legal doc) ──────
+
+def assemble_foi_data(bm, form, download_time):
+    """Assembles all FOI disclosure record fields into a structured dict."""
+
+    request_type      = form.get("foi_request_type", "Public")
+    identifiable = form.get("foi_identifiable", "no") == "yes"
+
+    # Legal basis logic
+    if identifiable:
+        legal_basis = (
+            "Data Protection — UK GDPR Article 6(1)(f) (legitimate interests) and/or "
+            "Article 6(1)(c) (legal obligation). DPA 2018 Schedule 2 applies where "
+            "disclosure is required for legal proceedings or law enforcement purposes. "
+            "Note: This disclosure involves footage containing identifiable individuals "
+            "and must NOT be processed under FOIA 2000."
+        )
+        governing_legislation = "Data Protection Act 2018 / UK GDPR"
+    elif request_type == "Public":
+        legal_basis = (
+            "Freedom of Information Act 2000. Disclosure is made in line with the Freedom of "
+            "Information Act 2000 and UK GDPR security and accountability principles (Article 5). "
+            "No identifiable individuals present in disclosed footage. Where personal data may be "
+            "incidentally captured, Section 40 FOIA exemption has been considered."
+        )
+        governing_legislation = "Freedom of Information Act 2000 / Data Protection Act 2018"
+    else:  # Solicitor or Insurance
+        legal_basis = (
+            "Data Protection Act 2018 Schedule 2 (legal claims). UK GDPR Article 6(1)(f) "
+            "(legitimate interests of the requesting party in connection with legal proceedings). "
+            "Disclosure is made in line with UK GDPR security and accountability principles (Article 5). "
+            "This disclosure is not made under FOIA 2000."
+        )
+        governing_legislation = "Data Protection Act 2018 / UK GDPR"
+
+    # Redaction — engineer's opinion only, FOI team decides
+    redaction_onsite = form.get("redaction_onsite", "yes")
+    if redaction_onsite == "no":
+        redaction_further      = "No — engineer assessment: footage appears suitable for disclosure"
+        redaction_responsibility = "FOI Team / Information Governance to confirm before onward disclosure."
+    else:
+        redaction_further      = "Yes — engineer assessment: footage likely requires redaction"
+        redaction_responsibility = "FOI Team / Information Governance — footage must be reviewed before onward disclosure."
+
+    # Time verification
+    time_verified = form.get("time_verified", "no") == "yes"
+
+    return {
+        "ref_id":               form.get("foi_ref", "Not provided"),
+        "date_disclosure":      download_time.strftime("%d/%m/%Y"),
+        "time_disclosure":      download_time.strftime("%H:%M"),
+        "request_type":         request_type,
+        "requestor":            form.get("foi_requester", "Not provided"),
+        "organisation":         form.get("foi_organisation", "Not provided"),
+        "date_received":        form.get("foi_date_received", "Not provided"),
+        "request_purpose":      form.get("foi_summary", "Not provided"),
+        "governing_legislation":governing_legislation,
+        "legal_basis":          legal_basis,
+        "identifiable":         "Yes" if identifiable else "No",
+        "location":             form.get("incident_location", "Not provided"),
+        "incident_type":        form.get("foi_incident_type", "Not provided"),
+        "system_ref":           SITE_REF,
+        "footage_start":        bm.get("start_fmt", ""),
+        "footage_end":          bm.get("end_fmt", ""),
+        "footage_duration":     bm.get("duration_fmt", ""),
+        "export_format":        form.get("foi_export_format", "MP4"),
+        "delivery_method":      form.get("media_type", "Not specified"),
+        "encryption":           form.get("foi_encryption", "No"),
+        "viewing_software":     form.get("foi_viewing_software", "No"),
+        "exhibit_id":           form.get("exhibit_ref", "Not provided"),
+        "redaction_onsite":     "Yes" if redaction_onsite == "yes" else "No",
+        "redaction_further":    redaction_further,
+        "redaction_resp":       redaction_responsibility,
+        "time_verified":        time_verified,
+        "time_source":          "BT Speaking Clock",
+        "time_verification":    form.get("foi_verify_time", "") if time_verified else "",
+        "time_system":          form.get("foi_system_time", "") if time_verified else "",
+        "time_offset":          form.get("foi_time_offset", "") if time_verified else "",
+        "verified_by":          form.get("witness_name", "") if time_verified else "",
+        "disclosed_by":         form.get("witness_name", ""),
+        "disclosed_role":       form.get("witness_role", ""),
+        "statement_date":       form.get("statement_date", download_time.strftime("%d/%m/%Y")),
+    }
+
+# ── Word doc — Witness Statement ──────────────────────────────────────────────
+
+def build_docx(statement_text, form, download_time):
+    witness_name = form.get("witness_name", "Officer")
+    doc = Document()
+
+    # Page setup
+    for sec in doc.sections:
+        sec.top_margin    = Inches(1)
+        sec.bottom_margin = Inches(1)
+        sec.left_margin   = Inches(1.25)
+        sec.right_margin  = Inches(1.25)
+
+    # Header
+    hp = doc.sections[0].header.paragraphs[0]
+    hp.text = "OFFICIAL SENSITIVE  —  WITNESS STATEMENT  —  NOT FOR DISTRIBUTION"
+    hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    hp.runs[0].font.size = Pt(8)
+    hp.runs[0].font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+    hp.runs[0].font.name = "Calibri"
+
+    # Footer
+    fp = doc.sections[0].footer.paragraphs[0]
+    fp.text = f"Generated: {download_time.strftime('%d/%m/%Y %H:%M')}  |  RMBC CCTV Evidence Unit  |  Prepared by: {witness_name}  |  System: {SITE_REF}"
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    fp.runs[0].font.size = Pt(8)
+    fp.runs[0].font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+    fp.runs[0].font.name = "Calibri"
+
+    def add_rule(doc, color=(0xCC, 0xCC, 0xCC)):
+        rule = doc.add_paragraph()
+        rule.paragraph_format.space_before = Pt(2)
+        rule.paragraph_format.space_after  = Pt(4)
+        rr = rule.add_run("─" * 90)
+        rr.font.size = Pt(7)
+        rr.font.color.rgb = RGBColor(*color)
+
+    def add_para(doc, text, size=11, space_after=8, bold=False, italic=False, color=None, align=None):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(space_after)
+        p.paragraph_format.space_before = Pt(2)
+        run = p.add_run(text)
+        run.font.size = Pt(size)
+        run.font.name = "Calibri"
+        run.bold = bold
+        run.italic = italic
+        if color:
+            run.font.color.rgb = RGBColor(*color)
+        if align:
+            p.alignment = align
+        return p
+
+    # ── Title block ──────────────────────────────────────────────────────────
+    t = doc.add_paragraph()
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    t.paragraph_format.space_before = Pt(6)
+    t.paragraph_format.space_after  = Pt(4)
+    tr = t.add_run("WITNESS STATEMENT")
+    tr.bold = True
+    tr.font.size = Pt(20)
+    tr.font.name = "Calibri"
+    tr.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
+
+    sub = doc.add_paragraph()
+    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    sub.paragraph_format.space_after = Pt(2)
+    sr = sub.add_run("CJ Act 1967, s.9  ·  MC Act 1980, ss.5A(3)(a) and 5B  ·  Police and Criminal Evidence Act 1984")
+    sr.italic = True
+    sr.font.size = Pt(9)
+    sr.font.name = "Calibri"
+    sr.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+
+    add_rule(doc, color=(0x1F, 0x49, 0x7D))
+
+    # ── Reference metadata block ─────────────────────────────────────────────
+    ref_parts = []
+    if form.get("crime_name"):   ref_parts.append(f"Incident: {form['crime_name']}")
+    if form.get("crime_number"): ref_parts.append(f"Crime Ref: {form['crime_number']}")
+    if form.get("flare_ref"):    ref_parts.append(f"Flare Ref: {form['flare_ref']}")
+    if form.get("foi_ref"):      ref_parts.append(f"FOI Ref: {form['foi_ref']}")
+    if ref_parts:
+        meta = doc.add_paragraph()
+        meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        meta.paragraph_format.space_after = Pt(2)
+        mr = meta.add_run("  |  ".join(ref_parts))
+        mr.font.size = Pt(9)
+        mr.font.name = "Calibri"
+        mr.bold = True
+        mr.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
+
+    stmt_date = form.get("statement_date", download_time.strftime("%d/%m/%Y"))
+    date_p = doc.add_paragraph()
+    date_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    date_p.paragraph_format.space_after = Pt(8)
+    dr = date_p.add_run(f"Statement Date: {stmt_date}  |  System Reference: {SITE_REF}")
+    dr.font.size = Pt(9)
+    dr.font.name = "Calibri"
+    dr.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+
+    add_rule(doc)
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+    # ── Statement body ───────────────────────────────────────────────────────
+    for line in statement_text.split("\n"):
+        line = line.rstrip()
+        if not line or line.startswith("---"):
+            # Minimal gap between paragraphs — not double spacing
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(2)
+        elif line.startswith("- ") or line.startswith("* "):
+            p = doc.add_paragraph(style="List Bullet")
+            p.paragraph_format.space_after  = Pt(3)
+            p.paragraph_format.space_before = Pt(0)
+            run = p.add_run(line[2:])
+            run.font.size = Pt(11)
+            run.font.name = "Calibri"
+        else:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after  = Pt(10)
+            p.paragraph_format.space_before = Pt(0)
+            parts = line.split("**")
+            bold = False
+            for part in parts:
+                if part:
+                    run = p.add_run(part)
+                    run.bold = bold
+                    run.font.size = Pt(11)
+                    run.font.name = "Calibri"
+                bold = not bold
+
+    # ── Divider before signature ─────────────────────────────────────────────
+    doc.add_paragraph().paragraph_format.space_after = Pt(8)
+    add_rule(doc)
+    doc.add_paragraph().paragraph_format.space_after = Pt(6)
+
+    # ── Signature block ──────────────────────────────────────────────────────
+    def sig_line(doc, label, value="", line_len=20):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after  = Pt(12)
+        p.paragraph_format.space_before = Pt(0)
+        lr = p.add_run(f"{label}  ")
+        lr.bold = True; lr.font.size = Pt(11); lr.font.name = "Calibri"
+        vr = p.add_run(value if value else "_" * line_len)
+        vr.font.size = Pt(11); vr.font.name = "Calibri"
+
+    sig_line(doc, "Signed:", line_len=20)
+    sig_line(doc, "Date:", value=stmt_date)
+    sig_line(doc, "Print Name:", value=witness_name.upper())
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+# ── Word doc — FOI Disclosure Record ─────────────────────────────────────────
+
+def build_foi_docx(data, download_time):
+    """Builds the 12-section CCTV Disclosure Record Word document."""
+    doc = Document()
+
+    for sec in doc.sections:
+        sec.top_margin    = Inches(0.9)
+        sec.bottom_margin = Inches(0.9)
+        sec.left_margin   = Inches(1.2)
+        sec.right_margin  = Inches(1.2)
+
+    # Header
+    hp = doc.sections[0].header.paragraphs[0]
+    hp.text = "OFFICIAL SENSITIVE  ·  CCTV DISCLOSURE RECORD  ·  INTERNAL USE ONLY"
+    hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    hp.runs[0].font.size = Pt(8)
+    hp.runs[0].font.color.rgb = RGBColor(0xA0, 0xA0, 0xA0)
+    hp.runs[0].font.name = "Calibri"
+
+    # Footer
+    fp = doc.sections[0].footer.paragraphs[0]
+    fp.text = (f"Generated: {download_time.strftime('%d/%m/%Y %H:%M')}  ·  "
+               f"RMBC CCTV Evidence Unit  ·  {data['disclosed_by']}  ·  {SITE_REF}")
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    fp.runs[0].font.size = Pt(8)
+    fp.runs[0].font.color.rgb = RGBColor(0xA0, 0xA0, 0xA0)
+    fp.runs[0].font.name = "Calibri"
+
+    BLUE    = RGBColor(0x1F, 0x49, 0x7D)
+    MIDBLUE = RGBColor(0x2E, 0x6B, 0xB0)
+    GREY    = RGBColor(0x55, 0x55, 0x55)
+    LGREY   = RGBColor(0xCC, 0xCC, 0xCC)
+
+    from docx.oxml.ns import qn as _qn
+    from docx.oxml   import OxmlElement as _OXE
+
+    def page_break():
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after  = Pt(0)
+        run = p.add_run()
+        br = _OXE("w:br")
+        br.set(_qn("w:type"), "page")
+        run._r.append(br)
+
+    def rule(color=LGREY, thick=False):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after  = Pt(5)
+        r = p.add_run("─" * 95)
+        r.font.size = Pt(7) if not thick else Pt(8)
+        r.font.color.rgb = color
+
+    def section_heading(num, title, pb=False):
+        if pb:
+            page_break()
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(14)
+        p.paragraph_format.space_after  = Pt(3)
+        r = p.add_run(f"{num}.  {title.upper()}")
+        r.bold = True
+        r.font.size = Pt(9.5)
+        r.font.name = "Calibri"
+        r.font.color.rgb = BLUE
+        rule(color=MIDBLUE)
+
+    def field(label, value, indent=True):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after  = Pt(4)
+        p.paragraph_format.space_before = Pt(0)
+        if indent:
+            p.paragraph_format.left_indent = Inches(0.25)
+        lr = p.add_run(f"{label}:  ")
+        lr.bold = True
+        lr.font.size = Pt(10)
+        lr.font.name = "Calibri"
+        lr.font.color.rgb = GREY
+        vr = p.add_run(str(value) if value else "\u2014")
+        vr.font.size = Pt(10)
+        vr.font.name = "Calibri"
+
+    def note(text):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after  = Pt(4)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.left_indent  = Inches(0.25)
+        r = p.add_run(text)
+        r.italic = True
+        r.font.size = Pt(9.5)
+        r.font.name = "Calibri"
+        r.font.color.rgb = GREY
+
+    # ── Title block
+    t = doc.add_paragraph()
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    t.paragraph_format.space_before = Pt(10)
+    t.paragraph_format.space_after  = Pt(3)
+    tr = t.add_run("CCTV DISCLOSURE RECORD")
+    tr.bold = True; tr.font.size = Pt(22)
+    tr.font.name = "Calibri"; tr.font.color.rgb = BLUE
+
+    cl = doc.add_paragraph()
+    cl.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cl.paragraph_format.space_after = Pt(1)
+    cr = cl.add_run("Classification: OFFICIAL SENSITIVE  ·  Disclosure Audit & Evidential Record")
+    cr.italic = True; cr.font.size = Pt(9)
+    cr.font.name = "Calibri"; cr.font.color.rgb = GREY
+
+    leg = doc.add_paragraph()
+    leg.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    leg.paragraph_format.space_after = Pt(6)
+    lr2 = leg.add_run(f"Governing Legislation: {data['governing_legislation']}")
+    lr2.italic = True; lr2.font.size = Pt(9)
+    lr2.font.name = "Calibri"; lr2.font.color.rgb = GREY
+
+    rule(color=BLUE, thick=True)
+
+    # S1
+    section_heading("1", "Disclosure Reference")
+    field("Reference ID", data["ref_id"])
+    field("Date of Disclosure", f"{data['date_disclosure']} at {data['time_disclosure']}")
+
+    # S2
+    section_heading("2", "Request Details")
+    field("Request Type", data["request_type"])
+    field("Requestor Name", data["requestor"])
+    field("Requesting Organisation", data["organisation"])
+    field("Date Request Received", data["date_received"])
+    field("Request Purpose", data["request_purpose"])
+
+    # S3
+    section_heading("3", "Legal Basis for Disclosure")
+    field("Identifiable Individuals or Vehicles in Footage", data["identifiable"])
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after  = Pt(4)
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.left_indent  = Inches(0.25)
+    r = p.add_run(data["legal_basis"])
+    r.font.size = Pt(9.5); r.font.name = "Calibri"; r.font.color.rgb = GREY
+
+    # S4
+    section_heading("4", "Incident Details")
+    field("Location", data["location"])
+    field("Incident Type", data["incident_type"])
+    field("System Reference", data["system_ref"])
+
+    # S5
+    section_heading("5", "Footage Details")
+    field("Start Time", data["footage_start"])
+    field("End Time", data["footage_end"])
+    field("Duration", data["footage_duration"])
+
+    # S6 — page break before
+    section_heading("6", "Disclosure Scope Statement", pb=True)
+    note("Only footage directly relevant to the stated request has been disclosed. "
+         "No additional footage has been provided beyond the period and location specified above. "
+         "This disclosure does not constitute admission of liability on the part of "
+         "Rotherham Metropolitan Borough Council.")
+
+    # S7
+    section_heading("7", "Format & Method of Disclosure")
+    field("Export Format", data["export_format"])
+    field("Delivery Method", data["delivery_method"])
+    field("Encryption Applied", data["encryption"])
+    field("Viewing Software Provided", data["viewing_software"])
+
+    # S8
+    section_heading("8", "Exhibit Reference")
+    field("Exhibit ID", data["exhibit_id"])
+
+    # S9
+    section_heading("9", "Handling & Integrity Statement")
+    note("Footage was extracted directly from the Nx Witness video management system. "
+         "No alterations have been made to the footage unless redaction is explicitly stated below. "
+         "Evidence continuity has been maintained throughout the handling process. "
+         "No hashing or digital signing has been applied unless separately documented.")
+
+    # S10
+    section_heading("10", "Redaction & Data Protection Handling")
+    field("Does Footage Require Redacting", data["redaction_onsite"])
+    field("Redaction Responsibility", data["redaction_resp"])
+
+    # S11
+    section_heading("11", "Time Synchronisation Verification")
+    if data["time_verified"]:
+        field("Time Verification Performed", "Yes")
+        field("Verification Source", data["time_source"])
+        field("Verification Time (Reference Clock)", data["time_verification"])
+        field("System Time at Verification", data["time_system"])
+        field("Offset", data["time_offset"])
+        field("Verified By", data["verified_by"])
+    else:
+        field("Time Verification Performed", "No")
+        note("Time verification was not performed for this disclosure. "
+             "Timestamps should be treated as system-reported and may vary from "
+             "absolute time if NTP synchronisation has not been confirmed.")
+
+    # S12 — page break before, on its own final page
+    section_heading("12", "Authorisation", pb=True)
+    field("Disclosed By", f"{data['disclosed_by']} — {data['disclosed_role']}")
+    field("Organisation", "Rotherham Metropolitan Borough Council — CCTV Evidence Unit")
+
+    doc.add_paragraph().paragraph_format.space_after = Pt(20)
+    rule(color=BLUE, thick=True)
+    doc.add_paragraph().paragraph_format.space_after = Pt(8)
+
+    for label, val in [
+        ("Signature", ""),
+        ("Print Name", data["disclosed_by"].upper()),
+        ("Date", data["statement_date"]),
+    ]:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(16)
+        lr = p.add_run(f"{label}:  ")
+        lr.bold = True; lr.font.size = Pt(11); lr.font.name = "Calibri"
+        lr.font.color.rgb = GREY
+        vr = p.add_run(val if val else "_" * 45)
+        vr.font.size = Pt(11); vr.font.name = "Calibri"
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+# ── Templates ─────────────────────────────────────────────────────────────────
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html><head><title>RMBC CCTV — Sign In</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:40px;width:420px;}
+.logo{text-align:center;margin-bottom:32px;}
+.logo .icon{font-size:40px;margin-bottom:12px;}
+.logo h1{color:#e6edf3;font-size:22px;font-weight:700;}
+.logo p{color:#8b949e;font-size:13px;margin-top:4px;}
+.badge{background:#1f4068;color:#58a6ff;padding:3px 10px;border-radius:20px;font-size:11px;font-family:'DM Mono',monospace;display:inline-block;margin-bottom:16px;}
+label{display:block;font-size:12px;color:#8b949e;font-weight:500;margin-bottom:6px;margin-top:16px;text-transform:uppercase;letter-spacing:0.5px;}
+input{width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;}
+input:focus{outline:none;border-color:#58a6ff;}
+button{width:100%;padding:12px;background:#238636;color:white;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;margin-top:20px;font-family:'DM Sans',sans-serif;}
+button:hover{background:#2ea043;}
+.error{background:#3d1a1a;border:1px solid #f85149;color:#f85149;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px;}
+.footer{text-align:center;margin-top:20px;font-size:11px;color:#484f58;}
+</style></head>
+<body><div class="card">
+<div class="logo">
+    <div class="icon">🎥</div>
+    <span class="badge">OFFICIAL SENSITIVE</span>
+    <h1>RMBC CCTV</h1>
+    <p>Evidence Management System</p>
+</div>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="POST">
+    <label>Username</label>
+    <input type="text" name="username" placeholder="e.g. dane.plant" autofocus required>
+    <label>Password</label>
+    <input type="password" name="password" required>
+    <button type="submit">Sign In →</button>
+</form>
+<div class="footer">Rotherham Metropolitan Borough Council · CCTV Evidence Unit · {{ site_ref }}</div>
+</div></body></html>"""
+
+BOOKMARKS_HTML = """<!DOCTYPE html>
+<html><head><title>RMBC CCTV — Select Incident</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:#e6edf3;}
+.topbar{background:#161b22;border-bottom:1px solid #30363d;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
+.topbar h1{font-size:15px;font-weight:700;}
+.topbar .right{font-size:13px;color:#8b949e;}
+.topbar a{color:#58a6ff;text-decoration:none;margin-left:12px;font-size:13px;}
+.site-badge{background:#1f2937;color:#58a6ff;padding:2px 8px;border-radius:4px;font-size:11px;font-family:'DM Mono',monospace;margin-left:8px;}
+.container{max-width:900px;margin:24px auto;padding:0 16px;}
+.page-title{font-size:20px;font-weight:700;margin-bottom:4px;}
+.page-sub{color:#8b949e;font-size:13px;margin-bottom:20px;}
+.bm{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 20px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;border-left:3px solid #238636;gap:12px;flex-wrap:wrap;}
+.bm:hover{border-color:#58a6ff;border-left-color:#58a6ff;}
+.bm-info{flex:1;min-width:0;}
+.bm-name{font-size:15px;font-weight:600;margin-bottom:3px;}
+.bm-desc{font-size:13px;color:#8b949e;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.bm-time{font-size:11px;color:#484f58;font-family:'DM Mono',monospace;}
+.bm-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;}
+.dur{font-size:13px;font-weight:700;color:#58a6ff;font-family:'DM Mono',monospace;}
+.btn-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+.btn{padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;display:inline-block;white-space:nowrap;}
+.btn-syp{background:#238636;color:white;}
+.btn-syp:hover{background:#2ea043;}
+.btn-rmbc{background:#1f4068;color:#58a6ff;border:1px solid #30363d;}
+.btn-rmbc:hover{background:#2a5a8a;color:white;}
+.btn-foi{background:#2a1a4a;color:#8a5cf6;border:1px solid #6e40c9;}
+.btn-foi:hover{background:#6e40c9;color:white;}
+.id-badge{background:#1f2937;color:#484f58;padding:2px 6px;border-radius:4px;font-size:10px;font-family:'DM Mono',monospace;margin-left:6px;}
+.empty{text-align:center;padding:60px;color:#484f58;}
+@media(max-width:600px){
+  .bm{flex-direction:column;align-items:flex-start;}
+  .bm-right{align-items:flex-start;width:100%;}
+  .btn-row{width:100%;}
+  .btn{flex:1;text-align:center;}
+  .sidebar{display:none;}
+}
+.sidebar-wrap{position:fixed;right:0;top:50vh;transform:translateY(-50%);z-index:9999;display:flex;align-items:stretch;}
+.sidebar-drawer{background:#161b22;border:1px solid #30363d;border-right:none;border-radius:10px 0 0 10px;width:0;overflow:hidden;opacity:0;transition:width 0.25s ease,opacity 0.2s ease;display:flex;flex-direction:column;justify-content:flex-start;}
+.sidebar-drawer.open{width:220px;opacity:1;}
+.sidebar-inner{padding:16px;white-space:nowrap;min-width:220px;}
+.sidebar-title{font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;font-family:'DM Mono',monospace;}
+.sidebar-link{display:block;font-size:12px;color:#58a6ff;text-decoration:none;padding:7px 10px;border-radius:6px;margin-bottom:4px;line-height:1.4;transition:background 0.15s;}
+.sidebar-link:hover{background:#1f4068;}
+.sidebar-divider{border:none;border-top:1px solid #21262d;margin:8px 0;}
+.sidebar-tab{background:#1f2937;color:#58a6ff;border:1px solid #30363d;border-right:none;border-radius:10px 0 0 10px;padding:12px 7px;cursor:pointer;display:flex;align-items:center;justify-content:center;width:28px;flex-shrink:0;transition:background 0.2s;}
+.sidebar-tab:hover{background:#1f4068;}
+.sidebar-tab span{writing-mode:vertical-rl;text-orientation:mixed;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;font-family:'DM Sans',sans-serif;user-select:none;}
+@media(max-width:768px){
+  .sidebar-wrap{top:auto;bottom:16px;transform:none;right:16px;flex-direction:column-reverse;align-items:flex-end;}
+  .sidebar-drawer{border-radius:10px;border-right:1px solid #30363d;width:0;}
+  .sidebar-drawer.open{width:220px;margin-bottom:8px;}
+  .sidebar-tab{border-radius:50px;border-right:1px solid #30363d;width:auto;padding:8px 14px;writing-mode:horizontal-tb;}
+  .sidebar-tab span{writing-mode:horizontal-tb;letter-spacing:1px;font-size:11px;}
+}
+</style></head>
+<body>
+
+<div class="sidebar-wrap" id="sidebarWrap">
+    <div class="sidebar-drawer" id="sidebarDrawer">
+        <div class="sidebar-inner">
+            <div class="sidebar-title">Resources</div>
+            <a class="sidebar-link" href="https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/" target="_blank" rel="noopener">Current UK GDPR Guidance</a>
+            <a class="sidebar-link" href="https://ico.org.uk/about-the-ico/" target="_blank" rel="noopener">About the ICO</a>
+            <hr class="sidebar-divider">
+            <a class="sidebar-link" href="https://www.legislation.gov.uk/ukpga/2000/36/contents" target="_blank" rel="noopener">Freedom of Information Act 2000</a>
+            <a class="sidebar-link" href="https://www.legislation.gov.uk/ukpga/2018/12/contents" target="_blank" rel="noopener">Data Protection Act 2018</a>
+            <hr class="sidebar-divider">
+            <a class="sidebar-link" href="https://www.rotherham.gov.uk/consultation-feedback/freedom-information-request-foi" target="_blank" rel="noopener">RMBC FOI Policy</a>
+        </div>
+    </div>
+    <div class="sidebar-tab" onclick="toggleSidebar()"><span>Resources</span></div>
+</div>
+<script>
+function toggleSidebar(){
+    var d=document.getElementById('sidebarDrawer');
+    if(d) d.classList.toggle('open');
+}
+</script>
+<div class="topbar">
+    <h1>🎥 RMBC CCTV — Evidence Management<span class="site-badge">{{ site_ref }}</span></h1>
+    <div class="right">{{ session.user_name }} · {{ session.user_role }}<a href="/logout">Sign out</a></div>
+</div>
+<div class="container">
+    <div class="page-title">Select Incident Bookmark</div>
+    <div class="page-sub">Choose a bookmark to generate a Witness Statement or FOI Disclosure Record.</div>
+    {% if bookmarks %}
+        {% for bm in bookmarks %}
+        <div class="bm">
+            <div class="bm-info">
+                <div class="bm-name">{{ bm.name or "(No name)" }}<span class="id-badge">{{ bm.record_id }}</span></div>
+                <div class="bm-desc">{{ bm.description or "No description" }}</div>
+                <div class="bm-time">{{ bm.start_fmt }} → {{ bm.end_fmt }}</div>
+            </div>
+            <div class="bm-right">
+                <div class="dur">{{ bm.duration_fmt }}</div>
+                <div class="btn-row">
+                    <a href="/syp/{{ bm.record_id }}" class="btn btn-syp">SYP Statement</a>
+                    <a href="/rmbc/{{ bm.record_id }}" class="btn btn-rmbc">RMBC Statement</a>
+                    <a href="/foi/{{ bm.record_id }}" class="btn btn-foi">FOI Record</a>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="empty">No bookmarks found. Create one in Nx Witness first.</div>
+    {% endif %}
+</div></body></html>"""
+
+FORM_HTML = """<!DOCTYPE html>
+<html><head><title>RMBC CCTV — Statement Form</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:#0d1117;color:#e6edf3;}
+.topbar{background:#161b22;border-bottom:1px solid #30363d;padding:14px 30px;display:flex;justify-content:space-between;align-items:center;}
+.topbar h1{font-size:16px;font-weight:700;}
+.topbar a{color:#58a6ff;text-decoration:none;font-size:13px;margin-left:16px;}
+.container{max-width:820px;margin:30px auto;padding:0 20px 80px;}
+.clock-box{background:#0d1117;border:1px solid #238636;border-radius:10px;padding:20px 24px;margin-bottom:24px;text-align:center;}
+.clock-label{font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;}
+.clock-date{font-size:17px;font-weight:600;color:#8b949e;margin-bottom:6px;font-family:'DM Mono',monospace;}
+.clock-time{font-size:48px;font-weight:700;color:#58a6ff;letter-spacing:3px;font-family:'DM Mono',monospace;line-height:1;}
+.clock-utc{font-size:11px;color:#484f58;margin-top:6px;font-family:'DM Mono',monospace;}
+.incident{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 22px;margin-bottom:20px;border-left:3px solid #58a6ff;}
+.incident h3{font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;}
+.incident p{font-size:13px;color:#8b949e;line-height:1.8;font-family:'DM Mono',monospace;}
+.section{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-bottom:16px;}
+.section h3{font-size:12px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:20px;padding-bottom:10px;border-bottom:1px solid #21262d;}
+.green-section{background:#0a1f0a;border:1px solid #238636;border-radius:10px;padding:24px;margin-bottom:16px;}
+.green-section h3{font-size:12px;font-weight:700;color:#3fb950;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;padding-bottom:10px;border-bottom:1px solid #1a3a1a;}
+.warning-box{background:#2d1f00;border:1px solid #d29922;border-radius:8px;padding:12px 16px;margin-top:14px;font-size:13px;color:#d29922;line-height:1.6;}
+.warning-box strong{display:block;margin-bottom:4px;}
+.hint{font-size:13px;color:#8b949e;margin-bottom:16px;line-height:1.5;}
+label{display:block;font-size:12px;color:#8b949e;font-weight:500;margin-bottom:6px;margin-top:14px;text-transform:uppercase;letter-spacing:0.4px;}
+label span{font-weight:400;text-transform:none;color:#484f58;margin-left:4px;}
+input,select,textarea{width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;}
+input:focus,select:focus,textarea:focus{outline:none;border-color:#58a6ff;}
+select option{background:#161b22;}
+textarea{resize:vertical;min-height:80px;}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
+.toggle-row{display:flex;align-items:center;gap:12px;margin-top:14px;}
+.toggle-row input[type=checkbox]{width:auto;margin:0;}
+.toggle-row label{margin:0;text-transform:none;font-size:13px;color:#8b949e;letter-spacing:0;}
+.handover-opts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px;}
+.h-opt{border:1px solid #30363d;border-radius:8px;padding:14px;text-align:center;cursor:pointer;background:#0d1117;}
+.h-opt:hover{border-color:#58a6ff;}
+.h-opt.active{border-color:#238636;background:#0d2b0d;}
+.h-opt input[type=radio]{display:none;}
+.h-opt .icon{font-size:24px;margin-bottom:6px;}
+.h-opt .title{font-size:13px;font-weight:600;color:#e6edf3;}
+.h-opt .sub{font-size:11px;color:#484f58;margin-top:2px;}
+.submit-btn{width:100%;padding:16px;background:#238636;color:white;border:none;border-radius:8px;font-size:16px;font-weight:700;cursor:pointer;margin-top:10px;font-family:'DM Sans',sans-serif;}
+.submit-btn:hover{background:#2ea043;}
+.submit-btn:disabled{background:#21262d;color:#484f58;cursor:not-allowed;}
+#loadingBox{display:none;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:30px;text-align:center;margin-top:16px;}
+#successBox{display:none;}
+@media(max-width:640px){
+  .row,.row3{grid-template-columns:1fr !important;}
+  .clock-time{font-size:30px !important;}
+  .handover-opts{grid-template-columns:1fr !important;}
+  .container{padding:0 12px 60px;}
+  .topbar h1{font-size:13px;}
+  .sidebar-wrap{top:auto;bottom:16px;transform:none;right:16px;flex-direction:column-reverse;align-items:flex-end;}
+  .sidebar-drawer{border-radius:10px;border-right:1px solid #30363d;width:0;}
+  .sidebar-drawer.open{width:220px;margin-bottom:8px;}
+  .sidebar-tab{border-radius:50px;border-right:1px solid #30363d;width:auto;padding:8px 14px;}
+  .sidebar-tab span{writing-mode:horizontal-tb;letter-spacing:1px;font-size:11px;}
+}
+.sidebar-wrap{position:fixed;right:0;top:50vh;transform:translateY(-50%);z-index:9999;display:flex;align-items:stretch;}
+.sidebar-drawer{background:#161b22;border:1px solid #30363d;border-right:none;border-radius:10px 0 0 10px;width:0;overflow:hidden;opacity:0;transition:width 0.25s ease,opacity 0.2s ease;display:flex;flex-direction:column;}
+.sidebar-drawer.open{width:220px;opacity:1;}
+.sidebar-inner{padding:16px;white-space:nowrap;min-width:220px;}
+.sidebar-title{font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;font-family:'DM Mono',monospace;}
+.sidebar-link{display:block;font-size:12px;color:#58a6ff;text-decoration:none;padding:7px 10px;border-radius:6px;margin-bottom:4px;line-height:1.4;transition:background 0.15s;}
+.sidebar-link:hover{background:#1f4068;}
+.sidebar-divider{border:none;border-top:1px solid #21262d;margin:8px 0;}
+.sidebar-tab{background:#1f2937;color:#58a6ff;border:1px solid #30363d;border-right:none;border-radius:10px 0 0 10px;padding:12px 7px;cursor:pointer;display:flex;align-items:center;justify-content:center;width:28px;flex-shrink:0;transition:background 0.2s;}
+.sidebar-tab:hover{background:#1f4068;}
+.sidebar-tab span{writing-mode:vertical-rl;text-orientation:mixed;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;font-family:'DM Sans',sans-serif;user-select:none;}
+</style></head>
+<body>
+
+<div class="sidebar-wrap" id="sidebarWrap">
+    <div class="sidebar-drawer" id="sidebarDrawer">
+        <div class="sidebar-inner">
+            <div class="sidebar-title">Resources</div>
+            <a class="sidebar-link" href="https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/" target="_blank" rel="noopener">Current UK GDPR Guidance</a>
+            <a class="sidebar-link" href="https://ico.org.uk/about-the-ico/" target="_blank" rel="noopener">About the ICO</a>
+            <hr class="sidebar-divider">
+            <a class="sidebar-link" href="https://www.legislation.gov.uk/ukpga/2000/36/contents" target="_blank" rel="noopener">Freedom of Information Act 2000</a>
+            <a class="sidebar-link" href="https://www.legislation.gov.uk/ukpga/2018/12/contents" target="_blank" rel="noopener">Data Protection Act 2018</a>
+            <hr class="sidebar-divider">
+            <a class="sidebar-link" href="https://www.rotherham.gov.uk/consultation-feedback/freedom-information-request-foi" target="_blank" rel="noopener">RMBC FOI Policy</a>
+        </div>
+    </div>
+    <div class="sidebar-tab" onclick="toggleSidebar()"><span>Resources</span></div>
+</div>
+<script>
+function toggleSidebar(){
+    var d=document.getElementById('sidebarDrawer');
+    if(d) d.classList.toggle('open');
+}
+</script>
+<div class="topbar">
+    <h1>🎥 RMBC CCTV — {% if pipeline == 'syp' %}SYP Witness Statement{% else %}RMBC Witness Statement{% endif %}</h1>
+    <div><a href="/">← Bookmarks</a><a href="/logout">Sign out</a></div>
+</div>
+<div class="container">
+
+    <div class="clock-box">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center;">
+            <div>
+                <div class="clock-label">📅 UK Official Time (Browser)</div>
+                <div class="clock-date" id="liveDate">Loading...</div>
+                <div class="clock-time" id="liveTime">--:--:--</div>
+                <div class="clock-utc" id="tzLabel">Loading...</div>
+            </div>
+            <div>
+                <div class="clock-label">🖥️ NVR Server Time</div>
+                <div class="clock-date" id="serverDate">Loading...</div>
+                <div class="clock-time" style="font-size:36px;">
+                    <span id="serverTimeHHMM">--:--:</span><span id="serverTimeSS" style="transition:color 1.5s ease;color:#58a6ff;">--</span>
+                </div>
+                <div class="clock-utc" id="serverDiff">Fetching...</div>
+            </div>
+        </div>
+        <button type="button" onclick="useTheseTimesForClockCheck()" style="margin-top:16px;background:#238636;color:white;border:none;border-radius:6px;padding:10px 24px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
+            ✅ Use These Times for Clock Check
+        </button>
+    </div>
+
+    <div class="incident">
+        <h3>📋 Incident: {{ bm.name }}</h3>
+        <p>
+            Start &nbsp;&nbsp;&nbsp;&nbsp;: {{ bm.start_fmt }}<br>
+            End &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {{ bm.end_fmt }}<br>
+            Duration &nbsp;: {{ bm.duration_fmt }}<br>
+            Bookmark created : {{ bm.created_fmt }}<br>
+            Description : {{ bm.description or "None" }}
+        </p>
+    </div>
+
+    <form id="stmtForm" method="POST">
+
+        <!-- 1. YOUR DETAILS -->
+        <div class="section">
+            <h3>👤 Your Details</h3>
+            <div class="row">
+                <div><label>Full Name</label><input type="text" name="witness_name" value="{{ session.user_name }}" required></div>
+                <div><label>Role / Job Title</label><input type="text" name="witness_role" value="{{ session.user_role }}" required></div>
+            </div>
+            <div class="row">
+                <div><label>Organisation</label><input type="text" name="witness_org" value="Rotherham Metropolitan Borough Council" required></div>
+                <div>
+                    <label>Currently Based At</label>
+                    <select name="witness_base" id="witnessBase">
+                        {% for loc in locations %}
+                        <option value="{{ loc }}">{{ loc }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="row">
+                <div><label>Contact Number / Email</label><input type="text" name="witness_contact" required></div>
+                <div><label>Date of Statement</label><input type="text" name="statement_date" id="statementDate" value="{{ today }}" required></div>
+            </div>
+        </div>
+
+        <!-- 2. INCIDENT REFERENCE -->
+        <div class="section">
+            <h3>📁 Incident Reference</h3>
+            <div class="toggle-row">
+                <input type="checkbox" id="no_ref_check" onchange="toggleRef(this)">
+                <label for="no_ref_check">No reference available — skip this section</label>
+            </div>
+            <div id="ref_fields" style="margin-top:4px;">
+                <div class="row">
+                    <div><label>Incident / Crime Name</label><input type="text" name="crime_name" placeholder="e.g. Criminal Damage"></div>
+                    <div><label>Crime Reference Number <span>(if known)</span></label><input type="text" name="crime_number" placeholder="e.g. 22/12345/24"></div>
+                </div>
+                <div class="row">
+                    <div><label>Flare Reference</label><input type="text" name="flare_ref" placeholder="e.g. FLR-2026-001"></div>
+                    <div><label>FOI Reference <span>(if applicable)</span></label><input type="text" name="foi_ref" placeholder="Leave blank if not applicable"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. LOCATION & CAMERA -->
+        <div class="section">
+            <h3>📍 Location &amp; Camera</h3>
+            <div class="row">
+                <div><label>Incident Location / Site Name</label><input type="text" name="incident_location" placeholder="e.g. Johns Street, Eastwood, Rotherham" required></div>
+                <div>
+                    <label>Post / Mounting Position</label>
+                    <input type="text" name="camera_location" id="cameraLocation" placeholder="Lamp Post — add number, e.g. Lamp Post 5" value="Lamp Post ">
+                </div>
+            </div>
+            <div style="font-size:12px;color:#484f58;margin-top:6px;">If no post number: enter <em>a Lamp Post on [Road Name]</em></div>
+        </div>
+
+        <!-- 4. BOOKMARK CREATOR -->
+        <div class="section">
+            <h3>🔖 Bookmark Creator</h3>
+            <p class="hint" style="margin-top:0;">Who created the bookmark in Nx Witness?</p>
+            <div class="row">
+                <div>
+                    <label>Bookmark Created By</label>
+                    <select name="bookmark_creator" id="bookmarkCreator">
+                        <option value="{{ session.user_name }}">{{ session.user_name }} (me)</option>
+                        <option value="__other__">Someone else — enter name below</option>
+                    </select>
+                </div>
+                <div id="other_creator_field" style="display:none;">
+                    <label>Creator's Full Name</label>
+                    <input type="text" name="bookmark_creator_other" placeholder="Full name of person who created the bookmark">
+                </div>
+            </div>
+        </div>
+
+        <!-- 5. NVR CLOCK CHECK -->
+        <div class="green-section">
+            <h3>🕐 NVR Clock Check</h3>
+            <div class="toggle-row">
+                <input type="checkbox" id="clock_checked_box" name="clock_checked" value="yes">
+                <label for="clock_checked_box">I have checked the NVR clock against the BT Speaking Clock</label>
+            </div>
+            <div id="clock_fields" style="display:none;margin-top:14px;">
+                <div class="row">
+                    <div><label>Date of Clock Check</label><input type="text" name="clock_check_date" id="clockDateField" value="{{ today }}"></div>
+                    <div><label>BT Speaking Clock Time</label><input type="text" name="bt_clock_time" placeholder="e.g. 08:50:07"></div>
+                </div>
+                <div class="row">
+                    <div><label>NVR System Displayed</label><input type="text" name="nvr_clock_time" placeholder="e.g. 08:45:07"></div>
+                    <div><label>Difference</label><input type="text" name="clock_difference" placeholder="e.g. 5 minutes"></div>
+                </div>
+                <div>
+                    <label>NVR Clock Is</label>
+                    <select name="clock_fast_slow">
+                        <option value="fast">Fast (NVR shows a later time than BT clock)</option>
+                        <option value="slow">Slow (NVR shows an earlier time than BT clock)</option>
+                        <option value="accurate">Accurate (within acceptable range)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- 6. EXPORT & CUSTODY -->
+        <div class="section">
+            <h3>🔗 Export &amp; Chain of Custody</h3>
+            <div class="row">
+                <div><label>Date Footage Exported</label><input type="text" name="export_date" id="exportDateField" value="{{ today }}"></div>
+                <div><label>Time Footage Exported</label><input type="text" name="export_time" id="exportTimeField" placeholder="e.g. 09:30:00"></div>
+            </div>
+            <div class="row">
+                <div><label>Exhibit Reference</label><input type="text" name="exhibit_ref" id="exhibitRef" value="{{ initials }}1" required></div>
+                <div>
+                    <label>Transferable Media Used</label>
+                    <select name="media_type" id="mediaTypeSelect">
+                        <option value="DVD Disc">DVD Disc</option>
+                        <option value="USB Device">USB Device</option>
+                        <option value="Raw Data">Raw Data</option>
+                    </select>
+                </div>
+            </div>
+            <div id="electronic_fields" style="display:none;margin-top:14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;">
+                <div style="font-size:12px;color:#58a6ff;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">📡 DEMS Transfer Details</div>
+                <div class="row">
+                    <div><label>Date of Upload</label><input type="text" name="electronic_date" placeholder="e.g. 01/03/2026"></div>
+                    <div><label>Time of Upload</label><input type="text" name="electronic_time" placeholder="e.g. 09:30"></div>
+                </div>
+                <div><label>Uploaded By</label><input type="text" name="electronic_by" value="{{ session.user_name }}"></div>
+                <div><label>Recipient / Access Provided To</label><input type="text" name="electronic_recipient" placeholder="e.g. DS Smith, South Yorkshire Police"></div>
+                <div><label>DEMS Reference / Job Number <span>(if known)</span></label><input type="text" name="electronic_ref" placeholder="Leave blank if not yet known"></div>
+            </div>
+        </div>
+
+        <!-- 7. HANDOVER -->
+        <div class="section">
+            <h3>🤝 Handover Method</h3>
+
+            {% if pipeline == 'syp' %}
+            <!-- SYP: DEMS | Personal Handover | Secure Storage -->
+            <div class="handover-opts" style="grid-template-columns:1fr 1fr 1fr;">
+                <div class="h-opt" id="opt_dems" onclick="setHandover('dems')">
+                    <input type="radio" name="handover_type" value="dems">
+                    <div class="icon">💻</div>
+                    <div class="title">DEMS Upload</div>
+                    <div class="sub">SYP Digital Evidence System</div>
+                </div>
+                <div class="h-opt" id="opt_person" onclick="setHandover('person')">
+                    <input type="radio" name="handover_type" value="person">
+                    <div class="icon">👮</div>
+                    <div class="title">Personal Handover</div>
+                    <div class="sub">Handed directly to officer</div>
+                </div>
+                <div class="h-opt active" id="opt_storage" onclick="setHandover('storage')">
+                    <input type="radio" name="handover_type" value="storage" checked>
+                    <div class="icon">🔒</div>
+                    <div class="title">Secure Storage Locker</div>
+                    <div class="sub">RMBC storage — collection TBC</div>
+                </div>
+            </div>
+
+            <div id="fields_dems" style="display:none;margin-top:14px;">
+                <div style="font-size:12px;color:#58a6ff;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;background:#0d1f2d;border:1px solid #1f4068;border-radius:8px;padding:12px;">
+                    💻 Complete DEMS transfer details below — leave blank if not yet uploaded.
+                </div>
+                <div class="row">
+                    <div><label>Date of Upload</label><input type="text" name="electronic_date" placeholder="e.g. 06/04/2026"></div>
+                    <div><label>Time of Upload</label><input type="text" name="electronic_time" placeholder="e.g. 09:30"></div>
+                </div>
+                <div><label>Uploaded By</label><input type="text" name="electronic_by" value="{{ session.user_name }}"></div>
+                <div><label>Recipient / Access Provided To</label><input type="text" name="electronic_recipient" placeholder="e.g. DS Smith, South Yorkshire Police"></div>
+                <div><label>DEMS Reference / Job Number <span>(if known)</span></label><input type="text" name="electronic_ref" placeholder="Leave blank if not yet known"></div>
+            </div>
+
+            {% else %}
+            <!-- RMBC: Personal Handover | Secure Storage | Case File -->
+            <div class="handover-opts" style="grid-template-columns:1fr 1fr 1fr;">
+                <div class="h-opt" id="opt_person" onclick="setHandover('person')">
+                    <input type="radio" name="handover_type" value="person">
+                    <div class="icon">👷</div>
+                    <div class="title">Personal Handover</div>
+                    <div class="sub">Handed directly to officer</div>
+                </div>
+                <div class="h-opt active" id="opt_storage" onclick="setHandover('storage')">
+                    <input type="radio" name="handover_type" value="storage" checked>
+                    <div class="icon">🔒</div>
+                    <div class="title">Secure Storage Locker</div>
+                    <div class="sub">RMBC storage — collection TBC</div>
+                </div>
+                <div class="h-opt" id="opt_casefile" onclick="setHandover('casefile')">
+                    <input type="radio" name="handover_type" value="casefile">
+                    <div class="icon">🗂</div>
+                    <div class="title">Case File</div>
+                    <div class="sub">Stored on RMBC internal system</div>
+                </div>
+            </div>
+
+            <div id="fields_casefile" style="display:none;margin-top:14px;">
+                <div class="row">
+                    <div><label>Case File Reference</label><input type="text" name="casefile_ref" placeholder="e.g. ENV-2026-001234"></div>
+                    <div>
+                        <label>Case Management System</label>
+                        <input type="text" name="casefile_system" value="Flare" readonly style="color:#484f58;cursor:not-allowed;">
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Shared: Personal Handover fields -->
+            <div id="fields_person" style="display:none;margin-top:16px;">
+                <div class="row">
+                    <div><label>Officer Name</label><input type="text" name="officer_name" id="officerName" placeholder="Police Officer's Name"></div>
+                    <div><label>Collar / Warrant Number</label><input type="text" name="officer_number" placeholder="e.g. 1234"></div>
+                </div>
+                <div class="row3">
+                    <div><label>Handover Location</label><input type="text" name="handover_location" id="handoverLocation" value="Rawmarsh Police Station"></div>
+                    <div><label>Handover Date</label><input type="text" name="handover_date" id="handoverDate" value="{{ today }}"></div>
+                    <div><label>Handover Time</label><input type="text" name="handover_time" id="handoverTime" placeholder="e.g. 09:15"></div>
+                </div>
+            </div>
+
+            <!-- Shared: Secure Storage fields -->
+            <div id="fields_storage" style="margin-top:12px;">
+                <p style="font-size:13px;color:#8b949e;padding:12px;background:#0d1117;border-radius:6px;border:1px solid #21262d;">
+                    🔒 The exhibit will be recorded as held in a secure CCTV storage locker.
+                </p>
+            </div>
+        </div>
+
+        <!-- Officer Responsibility Agreement — always shown at bottom -->
+        <div style="background:#1a1200;border:1px solid #d29922;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
+            <div style="font-size:13px;font-weight:700;color:#d29922;margin-bottom:10px;">Officer Responsibility</div>
+            <p style="font-size:13px;color:#c9a227;line-height:1.7;margin-bottom:14px;">
+                Once this footage is downloaded, it is the responsibility of the receiving officer to keep it secure and auditable in accordance with the security and accountability principles of UK GDPR (Article 5).
+            </p>
+            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:13px;color:#d29922;font-weight:400;">
+                <input type="checkbox" id="responsibilityCheck" onchange="toggleSubmit(this)" style="width:auto;margin-top:2px;flex-shrink:0;">
+                I acknowledge and accept responsibility for the secure handling of this footage.
+            </label>
+        </div>
+
+        <button type="submit" class="submit-btn" id="submitBtn" disabled style="opacity:0.5;cursor:not-allowed;">⚡ Generate Witness Statement</button>
+
+        <div id="loadingBox">
+            <div style="font-size:36px;margin-bottom:12px;">⏳</div>
+            <div style="font-size:16px;font-weight:700;color:#e6edf3;margin-bottom:8px;">Generating Statement...</div>
+            <div style="font-size:13px;color:#8b949e;">Please wait — approximately 30 seconds.</div>
+        </div>
+
+    </form>
+</div>
+
+<div id="successBox" style="display:none;max-width:820px;margin:0 auto;padding:0 20px 80px;">
+    <div style="background:#0d2b0d;border:1px solid #238636;border-radius:10px;padding:30px;text-align:center;">
+        <div style="font-size:44px;margin-bottom:12px;">✅</div>
+        <div style="font-size:20px;font-weight:700;color:#3fb950;margin-bottom:6px;">Statement Generated</div>
+        <div style="font-size:13px;color:#8b949e;margin-bottom:24px;">Your Word document is downloading now.</div>
+        <a href="/" style="background:#21262d;color:#e6edf3;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">← New Statement</a>
+    </div>
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
+        <div style="font-size:13px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #21262d;">Email Statement</div>
+        <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:end;">
+            <div>
+                <div style="font-size:11px;color:#8b949e;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Recipient Name</div>
+                <input type="text" id="emailRecipName" placeholder="e.g. david.brown" style="width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
+            </div>
+            <div style="padding-bottom:2px;font-size:18px;color:#484f58;text-align:center;">@</div>
+            <div>
+                <div style="font-size:11px;color:#8b949e;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Domain</div>
+                <select id="emailDomain" style="width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
+                    <option value="rotherham.gov.uk">rotherham.gov.uk</option>
+                    <option value="southyorkshire.police.uk">southyorkshire.police.uk</option>
+                </select>
+            </div>
+        </div>
+        <div id="emailStatus" style="font-size:13px;margin-top:10px;min-height:20px;"></div>
+        <button onclick="sendEmail()" id="sendEmailBtn" style="width:100%;margin-top:12px;padding:12px;background:#1f4068;color:#58a6ff;border:1px solid #30363d;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
+            Send Statement by Email
+        </button>
+    </div>
+</div>
+
+<script>
+function getUKTime() {
+    const now = new Date();
+    function lastSunday(year, month) {
+        const d = new Date(Date.UTC(year, month, 31));
+        d.setUTCDate(31 - d.getUTCDay());
+        return d;
+    }
+    const year = now.getUTCFullYear();
+    const isBST = now >= lastSunday(year, 2) && now < lastSunday(year, 9);
+    const uk = new Date(now.getTime() + (isBST ? 1 : 0) * 3600000);
+    const days   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    var hh = String(uk.getUTCHours()).padStart(2,'0');
+    var mm = String(uk.getUTCMinutes()).padStart(2,'0');
+    var ss = String(uk.getUTCSeconds()).padStart(2,'0');
+    document.getElementById('liveDate').textContent = days[uk.getUTCDay()] + ' ' + uk.getUTCDate() + ' ' + months[uk.getUTCMonth()] + ' ' + uk.getUTCFullYear();
+    document.getElementById('liveTime').textContent = hh + ':' + mm + ':' + ss;
+    document.getElementById('tzLabel').textContent  = (isBST ? 'British Summer Time (BST)' : 'Greenwich Mean Time (GMT)') + ' · Updates every second';
+    var et = document.getElementById('exportTimeField');
+    if (et && !et.dataset.touched && !et.value) et.placeholder = hh + ':' + mm + ':' + ss + ' (now)';
+    var ht = document.getElementById('handoverTime');
+    if (ht && !ht.dataset.touched && !ht.value) ht.placeholder = hh + ':' + mm + ' (now)';
+}
+getUKTime();
+setInterval(getUKTime, 1000);
+
+function fetchServerTime() {
+    fetch('/server-time')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('serverDate').textContent = data.date;
+            var parts   = data.time.split(':');
+            var hhmmStr = parts[0] + ':' + parts[1] + ':';
+            var secStr  = parts[2];
+            document.getElementById('serverTimeHHMM').textContent = hhmmStr;
+            var secEl = document.getElementById('serverTimeSS');
+            secEl.textContent = secStr;
+            secEl.style.transition = 'none';
+            secEl.style.color = '#3fb950';
+            secEl.style.textShadow = '0 0 12px #3fb950';
+            setTimeout(function() {
+                secEl.style.transition = 'color 1.5s ease, text-shadow 1.5s ease';
+                secEl.style.color = '#58a6ff';
+                secEl.style.textShadow = 'none';
+            }, 200);
+            var btText = document.getElementById('liveTime').textContent;
+            if (btText && btText !== '--:--:--') {
+                var b = btText.split(':').map(Number);
+                var s = data.time.split(':').map(Number);
+                var diffSecs = (s[0]*3600 + s[1]*60 + s[2]) - (b[0]*3600 + b[1]*60 + b[2]);
+                var absDiff  = Math.abs(diffSecs);
+                var dMins = Math.floor(absDiff / 60);
+                var dSecs = absDiff % 60;
+                var diffStr;
+                if (absDiff < 10)   diffStr = 'Within 10 seconds — accurate';
+                else if (dMins > 0) diffStr = 'Server is ' + (diffSecs > 0 ? 'fast' : 'slow') + ' by ' + dMins + 'm ' + dSecs + 's';
+                else                diffStr = 'Server is ' + (diffSecs > 0 ? 'fast' : 'slow') + ' by ' + dSecs + ' seconds';
+                document.getElementById('serverDiff').textContent = diffStr;
+            }
+        })
+        .catch(function() {
+            document.getElementById('serverDate').textContent = 'Unavailable';
+            document.getElementById('serverTimeHHMM').textContent = '--:--:';
+            document.getElementById('serverTimeSS').textContent  = '--';
+            document.getElementById('serverDiff').textContent    = 'Could not reach server';
+        });
+}
+fetchServerTime();
+setInterval(fetchServerTime, 5000);
+
+function useTheseTimesForClockCheck() {
+    var btTime  = document.getElementById('liveTime').textContent;
+    var hhmm    = document.getElementById('serverTimeHHMM').textContent;
+    var secPart = document.getElementById('serverTimeSS').textContent;
+    var srvTime = hhmm + secPart;
+    if (btTime === '--:--:--' || srvTime === '--:--:--') { alert('Times not yet loaded — wait a moment and try again.'); return; }
+    var cb = document.getElementById('clock_checked_box');
+    if (cb) { cb.checked = true; toggleClock(cb); }
+    var cd = document.querySelector('[name="clock_check_date"]');
+    var bf = document.querySelector('[name="bt_clock_time"]');
+    var nf = document.querySelector('[name="nvr_clock_time"]');
+    var df = document.querySelector('[name="clock_difference"]');
+    var fs = document.querySelector('[name="clock_fast_slow"]');
+    var sd = document.getElementById('statementDate');
+    if (cd) cd.value = sd ? sd.value : document.getElementById('serverDate').textContent;
+    if (bf) bf.value = btTime;
+    if (nf) nf.value = srvTime;
+    var b = btTime.split(':').map(Number);
+    var s = srvTime.split(':').map(Number);
+    var diffSecs = (s[0]*3600 + s[1]*60 + s[2]) - (b[0]*3600 + b[1]*60 + b[2]);
+    var absDiff  = Math.abs(diffSecs);
+    var dMins = Math.floor(absDiff / 60);
+    var dSecs = absDiff % 60;
+    if (df) {
+        if (absDiff < 10)   df.value = 'less than 10 seconds';
+        else if (dMins > 0) df.value = dMins + ' minute' + (dMins > 1 ? 's' : '') + ' and ' + dSecs + ' seconds';
+        else                df.value = dSecs + ' seconds';
+    }
+    if (fs) {
+        if (absDiff < 10)       fs.value = 'accurate';
+        else if (diffSecs > 0)  fs.value = 'fast';
+        else                    fs.value = 'slow';
+    }
+    var gs = document.querySelector('.green-section');
+    if (gs) gs.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function setHandover(type) {
+    ['person','dems','storage','casefile'].forEach(function(t) {
+        var opt = document.getElementById('opt_' + t);
+        if (opt) opt.classList.remove('active');
+        var f = document.getElementById('fields_' + t);
+        if (f) f.style.display = 'none';
+    });
+    var activeOpt = document.getElementById('opt_' + type);
+    if (activeOpt) activeOpt.classList.add('active');
+    var radio = document.querySelector('input[name="handover_type"][value="' + type + '"]');
+    if (radio) radio.checked = true;
+    var show = document.getElementById('fields_' + type);
+    if (show) show.style.display = 'block';
+    if (type === 'person') { setTimeout(function() { var n = document.getElementById('officerName'); if (n) n.focus(); }, 100); }
+}
+setHandover('storage');
+
+function toggleClock(cb) {
+    var f = document.getElementById('clock_fields');
+    if (f) f.style.display = cb.checked ? 'block' : 'none';
+}
+var clockCb = document.getElementById('clock_checked_box');
+if (clockCb) clockCb.addEventListener('change', function() { toggleClock(this); });
+
+function toggleRef(cb) {
+    var f = document.getElementById('ref_fields');
+    if (f) f.style.display = cb.checked ? 'none' : 'block';
+}
+
+var bcEl = document.getElementById('bookmarkCreator');
+if (bcEl) bcEl.addEventListener('change', function() {
+    var f = document.getElementById('other_creator_field');
+    if (f) f.style.display = this.value === '__other__' ? 'block' : 'none';
+});
+
+var allInputs = document.querySelectorAll('input');
+for (var i = 0; i < allInputs.length; i++) {
+    allInputs[i].addEventListener('input', function() { this.dataset.touched = '1'; });
+}
+
+function toggleSubmit(cb) {
+    var btn = document.getElementById('submitBtn');
+    if (!btn) return;
+    if (cb.checked) {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+    } else {
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
+        btn.style.cursor = 'not-allowed';
+    }
+}
+
+var stmtForm = document.getElementById('stmtForm');
+var _docToken = null;
+if (stmtForm) stmtForm.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var creatorSel = document.getElementById('bookmarkCreator');
+    if (creatorSel && creatorSel.value === '__other__') {
+        var otherInput = document.querySelector('input[name="bookmark_creator_other"]');
+        creatorSel.value = (otherInput && otherInput.value.trim()) ? otherInput.value.trim() : 'Unknown';
+    }
+    var btn = document.getElementById('submitBtn');
+    btn.disabled = true; btn.textContent = '⏳ Generating...';
+    document.getElementById('loadingBox').style.display = 'block';
+    fetch(window.location.href, {method:'POST', body: new FormData(this)})
+        .then(function(r) {
+            if (!r.ok) throw new Error('Server error ' + r.status);
+            _docToken = r.headers.get('X-Doc-Token');
+            return r.blob();
+        })
+        .then(function(blob) {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a'); a.href = url;
+            a.download = 'witness_statement.docx';
+            document.body.appendChild(a); a.click();
+            document.body.removeChild(a); URL.revokeObjectURL(url);
+            document.getElementById('loadingBox').style.display = 'none';
+            document.querySelector('.container').style.display  = 'none';
+            document.getElementById('successBox').style.display = 'block';
+        })
+        .catch(function(err) {
+            document.getElementById('loadingBox').innerHTML =
+                '<div style="color:#f85149;font-size:15px;margin-bottom:12px;">❌ Error: ' + err.message + '</div>' +
+                '<button onclick="location.reload()" style="background:#21262d;color:#e6edf3;padding:10px 20px;border-radius:6px;border:none;cursor:pointer;">Try Again</button>';
+        });
+});
+
+function sendEmail() {
+    var name   = document.getElementById('emailRecipName').value.trim();
+    var domain = document.getElementById('emailDomain').value;
+    var status = document.getElementById('emailStatus');
+    var btn    = document.getElementById('sendEmailBtn');
+    if (!name) { status.style.color='#f85149'; status.textContent='Please enter a recipient name.'; return; }
+    if (!_docToken) { status.style.color='#f85149'; status.textContent='No document token — please regenerate the statement.'; return; }
+    btn.disabled = true; btn.textContent = '⏳ Sending...';
+    status.style.color = '#8b949e'; status.textContent = 'Sending to ' + name + '@' + domain + '...';
+    fetch('/send-email', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: _docToken, recipient_name: name, recipient_domain: domain})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) {
+            status.style.color = '#3fb950';
+            status.textContent = '✅ Email sent successfully to ' + data.recipient;
+            btn.textContent = '📧 Send Another Copy';
+            btn.disabled = false;
+        } else {
+            status.style.color = '#f85149';
+            status.textContent = '❌ ' + data.error;
+            btn.textContent = '📧 Send Statement by Email';
+            btn.disabled = false;
+        }
+    })
+    .catch(function(err) {
+        status.style.color = '#f85149';
+        status.textContent = '❌ Network error: ' + err.message;
+        btn.textContent = '📧 Send Statement by Email';
+        btn.disabled = false;
+    });
+}
+</script>
+</body></html>"""
+
+FOI_FORM_HTML = """<!DOCTYPE html>
+<html><head><title>RMBC CCTV — FOI Disclosure Record</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:#0d1117;color:#e6edf3;}
+.topbar{background:#161b22;border-bottom:1px solid #30363d;padding:14px 30px;display:flex;justify-content:space-between;align-items:center;}
+.topbar h1{font-size:16px;font-weight:700;}
+.topbar a{color:#58a6ff;text-decoration:none;font-size:13px;margin-left:16px;}
+.container{max-width:820px;margin:30px auto;padding:0 20px 80px;}
+.incident{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 22px;margin-bottom:20px;border-left:3px solid #8a5cf6;}
+.incident h3{font-size:13px;font-weight:700;color:#8a5cf6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;}
+.incident p{font-size:13px;color:#8b949e;line-height:1.8;font-family:'DM Mono',monospace;}
+.section{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-bottom:14px;}
+.section h3{font-size:12px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:18px;padding-bottom:10px;border-bottom:1px solid #21262d;}
+.section h3 span{font-size:10px;background:#1f2937;color:#484f58;padding:2px 8px;border-radius:4px;margin-left:8px;font-weight:400;text-transform:none;letter-spacing:0;}
+.purple-section{background:#120a1f;border:1px solid #6e40c9;border-radius:10px;padding:24px;margin-bottom:14px;}
+.purple-section h3{font-size:12px;font-weight:700;color:#8a5cf6;text-transform:uppercase;letter-spacing:1px;margin-bottom:18px;padding-bottom:10px;border-bottom:1px solid #2a1a4a;}
+.green-section{background:#0a1f0a;border:1px solid #238636;border-radius:10px;padding:24px;margin-bottom:14px;}
+.green-section h3{font-size:12px;font-weight:700;color:#3fb950;text-transform:uppercase;letter-spacing:1px;margin-bottom:18px;padding-bottom:10px;border-bottom:1px solid #1a3a1a;}
+.warning-box{background:#2d1f00;border:1px solid #d29922;border-radius:8px;padding:12px 16px;margin-top:10px;font-size:12px;color:#d29922;line-height:1.6;}
+.info-box{background:#0d1f2d;border:1px solid #1f4068;border-radius:8px;padding:12px 16px;margin-top:10px;font-size:12px;color:#58a6ff;line-height:1.6;}
+label{display:block;font-size:12px;color:#8b949e;font-weight:500;margin-bottom:6px;margin-top:14px;text-transform:uppercase;letter-spacing:0.4px;}
+label span{font-weight:400;text-transform:none;color:#484f58;margin-left:4px;}
+input,select,textarea{width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;}
+input:focus,select:focus,textarea:focus{outline:none;border-color:#8a5cf6;}
+select option{background:#161b22;}
+textarea{resize:vertical;min-height:70px;}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
+.toggle-row{display:flex;align-items:center;gap:12px;margin-top:10px;}
+.toggle-row input[type=checkbox]{width:auto;margin:0;}
+.toggle-row label{margin:0;text-transform:none;font-size:13px;color:#8b949e;letter-spacing:0;}
+.submit-btn{width:100%;padding:16px;background:#6e40c9;color:white;border:none;border-radius:8px;font-size:16px;font-weight:700;cursor:pointer;margin-top:10px;font-family:'DM Sans',sans-serif;}
+.submit-btn:hover{background:#8a5cf6;}
+.submit-btn:disabled{background:#21262d;color:#484f58;cursor:not-allowed;}
+#loadingBox{display:none;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:30px;text-align:center;margin-top:16px;}
+#successBox{display:none;}
+.legal-badge{display:inline-block;background:#1a0d2b;color:#8a5cf6;border:1px solid #6e40c9;padding:6px 14px;border-radius:6px;font-size:12px;font-family:'DM Mono',monospace;margin-top:8px;}
+@media(max-width:640px){
+  .row,.row3{grid-template-columns:1fr !important;}
+  .container{padding:0 12px 60px;}
+  .topbar h1{font-size:13px;}
+  .sidebar-wrap{top:auto;bottom:16px;transform:none;right:16px;flex-direction:column-reverse;align-items:flex-end;}
+  .sidebar-drawer{border-radius:10px;border-right:1px solid #6e40c9;width:0;}
+  .sidebar-drawer.open{width:220px;margin-bottom:8px;}
+  .sidebar-tab{border-radius:50px;border-right:1px solid #6e40c9;width:auto;padding:8px 14px;}
+  .sidebar-tab span{writing-mode:horizontal-tb;letter-spacing:1px;font-size:11px;}
+}
+.sidebar-wrap{position:fixed;right:0;top:50vh;transform:translateY(-50%);z-index:9999;display:flex;align-items:stretch;}
+.sidebar-drawer{background:#161b22;border:1px solid #30363d;border-right:none;border-radius:10px 0 0 10px;width:0;overflow:hidden;opacity:0;transition:width 0.25s ease,opacity 0.2s ease;display:flex;flex-direction:column;}
+.sidebar-drawer.open{width:220px;opacity:1;}
+.sidebar-inner{padding:16px;white-space:nowrap;min-width:220px;}
+.sidebar-title{font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;font-family:'DM Mono',monospace;}
+.sidebar-link{display:block;font-size:12px;color:#8a5cf6;text-decoration:none;padding:7px 10px;border-radius:6px;margin-bottom:4px;line-height:1.4;transition:background 0.15s;}
+.sidebar-link:hover{background:#2a1a4a;}
+.sidebar-divider{border:none;border-top:1px solid #21262d;margin:8px 0;}
+.sidebar-tab{background:#2a1a4a;color:#8a5cf6;border:1px solid #6e40c9;border-right:none;border-radius:10px 0 0 10px;padding:12px 7px;cursor:pointer;display:flex;align-items:center;justify-content:center;width:28px;flex-shrink:0;transition:background 0.2s;}
+.sidebar-tab:hover{background:#6e40c9;}
+.sidebar-tab span{writing-mode:vertical-rl;text-orientation:mixed;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;font-family:'DM Sans',sans-serif;user-select:none;}
+@media(max-width:768px){
+  .sidebar-wrap{top:auto;bottom:16px;transform:none;right:16px;flex-direction:column-reverse;align-items:flex-end;}
+  .sidebar-drawer{border-radius:10px;border-right:1px solid #6e40c9;width:0;}
+  .sidebar-drawer.open{width:220px;margin-bottom:8px;}
+  .sidebar-tab{border-radius:50px;border-right:1px solid #6e40c9;width:auto;padding:8px 14px;}
+  .sidebar-tab span{writing-mode:horizontal-tb;letter-spacing:1px;font-size:11px;}
+}
+</style></head>
+<body>
+
+<div class="sidebar-wrap" id="sidebarWrap">
+    <div class="sidebar-drawer" id="sidebarDrawer">
+        <div class="sidebar-inner">
+            <div class="sidebar-title">Resources</div>
+            <a class="sidebar-link" href="https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/" target="_blank" rel="noopener">Current UK GDPR Guidance</a>
+            <a class="sidebar-link" href="https://ico.org.uk/about-the-ico/" target="_blank" rel="noopener">About the ICO</a>
+            <hr class="sidebar-divider">
+            <a class="sidebar-link" href="https://www.legislation.gov.uk/ukpga/2000/36/contents" target="_blank" rel="noopener">Freedom of Information Act 2000</a>
+            <a class="sidebar-link" href="https://www.legislation.gov.uk/ukpga/2018/12/contents" target="_blank" rel="noopener">Data Protection Act 2018</a>
+            <hr class="sidebar-divider">
+            <a class="sidebar-link" href="https://www.rotherham.gov.uk/consultation-feedback/freedom-information-request-foi" target="_blank" rel="noopener">RMBC FOI Policy</a>
+        </div>
+    </div>
+    <div class="sidebar-tab" onclick="toggleSidebar()"><span>Resources</span></div>
+</div>
+<script>
+function toggleSidebar(){
+    var d=document.getElementById('sidebarDrawer');
+    if(d) d.classList.toggle('open');
+}
+</script>
+<div class="topbar">
+    <h1>📋 RMBC CCTV — Disclosure Record</h1>
+    <div><a href="/">← Bookmarks</a><a href="/logout">Sign out</a></div>
+</div>
+<div class="container">
+
+    <div class="incident">
+        <h3>📋 Footage: {{ bm.name }}</h3>
+        <p>Period &nbsp;&nbsp;: {{ bm.start_fmt }} → {{ bm.end_fmt }}<br>Duration : {{ bm.duration_fmt }}<br>System &nbsp;&nbsp;: {{ site_ref }}</p>
+    </div>
+
+    <!-- Clock comparison — mandatory on all forms -->
+    <div style="background:#0d1117;border:1px solid #6e40c9;border-radius:10px;padding:20px 24px;margin-bottom:20px;text-align:center;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center;">
+            <div>
+                <div style="font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;">UK Official Time (Browser)</div>
+                <div style="font-size:17px;font-weight:600;color:#8b949e;margin-bottom:6px;font-family:'DM Mono',monospace;" id="foiLiveDate">Loading...</div>
+                <div style="font-size:40px;font-weight:700;color:#8a5cf6;letter-spacing:3px;font-family:'DM Mono',monospace;line-height:1;" id="foiLiveTime">--:--:--</div>
+                <div style="font-size:11px;color:#484f58;margin-top:6px;font-family:'DM Mono',monospace;" id="foiTzLabel">Loading...</div>
+            </div>
+            <div>
+                <div style="font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;">NVR Server Time</div>
+                <div style="font-size:17px;font-weight:600;color:#8b949e;margin-bottom:6px;font-family:'DM Mono',monospace;" id="foiServerDate">Loading...</div>
+                <div style="font-size:40px;font-weight:700;letter-spacing:3px;font-family:'DM Mono',monospace;line-height:1;">
+                    <span id="foiServerHHMM" style="color:#8a5cf6;">--:--:</span><span id="foiServerSS" style="color:#8a5cf6;">--</span>
+                </div>
+                <div style="font-size:11px;color:#484f58;margin-top:6px;font-family:'DM Mono',monospace;" id="foiServerDiff">Fetching...</div>
+            </div>
+        </div>
+        <button type="button" onclick="foiUseTheseTimes()" style="margin-top:16px;background:#6e40c9;color:white;border:none;border-radius:6px;padding:10px 24px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
+            Use These Times for Clock Check
+        </button>
+    </div>
+
+    <form id="foiForm" method="POST">
+
+        <!-- S1+2: Reference & Request Details -->
+        <div class="section">
+            <h3>📁 Section 1–2 · Reference &amp; Request Details</h3>
+            <div class="row">
+                <div><label>Disclosure / FOI Reference <span>(if known)</span></label><input type="text" name="foi_ref" placeholder="e.g. FOI-2026-001"></div>
+                <div>
+                    <label>Request Type</label>
+                    <select name="foi_request_type" id="foiRequestType" onchange="updateLegalBasis()">
+                        <option value="Public">Public (FOIA 2000)</option>
+                        <option value="Solicitor">Solicitor / Legal</option>
+                        <option value="Insurance">Insurance Company</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row">
+                <div><label>Requestor Name</label><input type="text" name="foi_requester" placeholder="Full name" required></div>
+                <div><label>Requesting Organisation</label><input type="text" name="foi_organisation" placeholder="e.g. South Yorkshire Police"></div>
+            </div>
+            <div class="row">
+                <div><label>Date Request Received</label><input type="text" name="foi_date_received" value="{{ today }}"></div>
+                <div><label>Incident Type</label><input type="text" name="foi_incident_type" placeholder="e.g. Fly Tipping, Criminal Damage"></div>
+            </div>
+            <div><label>Summary of Request <span>(brief description)</span></label>
+                <textarea name="foi_summary" placeholder="e.g. Request for footage of fly tipping incident at the above location." required></textarea>
+            </div>
+            <div><label>Incident Location</label><input type="text" name="incident_location" placeholder="e.g. High Street, Rotherham" required></div>
+        </div>
+
+        <!-- S3: Legal Basis -->
+        <div class="purple-section">
+            <h3>Section 3 · Legal Basis for Disclosure</h3>
+            <p style="font-size:12px;color:#8b949e;margin-bottom:16px;line-height:1.6;">Disclosure is made in line with the Freedom of Information Act 2000, the Data Protection Act 2018, and UK GDPR.</p>
+
+            <label style="font-size:12px;color:#8b949e;font-weight:500;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:10px;display:block;">Footage contains identifiable individuals or vehicles</label>
+            <div style="display:flex;gap:24px;margin-bottom:12px;">
+                <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#e6edf3;letter-spacing:0;cursor:pointer;">
+                    <input type="radio" id="identifiableYes" name="foi_identifiable" value="yes" onchange="updateLegalBasis()" style="width:auto;margin:0;">
+                    Yes
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#e6edf3;letter-spacing:0;cursor:pointer;">
+                    <input type="radio" id="identifiableNo" name="foi_identifiable" value="no" onchange="updateLegalBasis()" checked style="width:auto;margin:0;">
+                    No
+                </label>
+            </div>
+
+            <div class="warning-box" id="identifiableWarning" style="display:none;">
+                <strong>⚠️ Advisory</strong>
+                Identifiable people or vehicle number plates are present — this disclosure must be processed under <strong>UK GDPR / DPA 2018</strong>, not FOIA 2000. Ensure the appropriate lawful basis is in place before disclosure.
+            </div>
+            <div class="legal-badge" id="legalBadge" style="margin-top:10px;">FOIA 2000</div>
+            <input type="hidden" name="foi_legal_display" id="legalDisplay" value="FOIA 2000">
+        </div>
+
+        <!-- S4-5: Incident & Footage (auto from bookmark) -->
+        <div class="section">
+            <h3>📍 Section 4–5 · Incident &amp; Footage Details <span>auto-populated from bookmark</span></h3>
+            <div class="info-box">
+                ℹ️ Footage period, duration and system reference are automatically populated from the selected bookmark.
+            </div>
+            <div class="row" style="margin-top:14px;">
+                <div><label>Footage Start</label><input type="text" value="{{ bm.start_fmt }}" readonly style="color:#484f58;cursor:not-allowed;"></div>
+                <div><label>Footage End</label><input type="text" value="{{ bm.end_fmt }}" readonly style="color:#484f58;cursor:not-allowed;"></div>
+            </div>
+            <div class="row">
+                <div><label>Duration</label><input type="text" value="{{ bm.duration_fmt }}" readonly style="color:#484f58;cursor:not-allowed;"></div>
+                <div><label>System Reference</label><input type="text" value="{{ site_ref }}" readonly style="color:#484f58;cursor:not-allowed;"></div>
+            </div>
+        </div>
+
+        <!-- S7: Format & Delivery -->
+        <div class="section">
+            <h3>💿 Section 7 · Format &amp; Method of Disclosure</h3>
+            <div class="row">
+                <div>
+                    <label>Export Format</label>
+                    <select name="foi_export_format">
+                        <option value="MP4">MP4</option>
+                        <option value="AVI">AVI</option>
+                        <option value="Native NVR Format">Native NVR Format</option>
+                    </select>
+                </div>
+                <div>
+                    <label>Delivery Method</label>
+                    <select name="media_type">
+                        <option value="Raw Data Files">Raw Data Files</option>
+                        <option value="DVD Disc">DVD Disc</option>
+                        <option value="USB Device">USB Device</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row">
+                <div>
+                    <label>Encryption Applied</label>
+                    <select name="foi_encryption">
+                        <option value="No">No</option>
+                        <option value="Yes">Yes</option>
+                    </select>
+                </div>
+                <div>
+                    <label>Viewing Software Provided</label>
+                    <select name="foi_viewing_software">
+                        <option value="No">No</option>
+                        <option value="Yes — VLC Media Player">Yes — VLC Media Player</option>
+                        <option value="Yes — Nx Witness Client">Yes — Nx Witness Client</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- S8: Exhibit -->
+        <div class="section">
+            <h3>🏷️ Section 8 · Exhibit Reference</h3>
+            <div><label>Exhibit ID</label><input type="text" name="exhibit_ref" value="{{ initials }}1" required></div>
+        </div>
+
+        <!-- S10: Redaction -->
+        <div class="purple-section">
+            <h3>Section 10 · Redaction Guidance</h3>
+            <p style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.6;">This is the engineer's assessment only. The FOI Team / Information Governance makes the final redaction decision.</p>
+            <div>
+                <label>Does footage require redacting?</label>
+                <select name="redaction_onsite" id="redactionOnsite">
+                    <option value="yes">Yes — footage likely contains content requiring redaction</option>
+                    <option value="no">No — footage appears suitable for disclosure without redaction</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- S11: Time Verification (optional) -->
+        <div class="green-section">
+            <h3>🕐 Section 11 · Time Synchronisation Verification <span>optional</span></h3>
+            <div class="toggle-row">
+                <input type="checkbox" id="timeVerifyCheck" name="time_verified" value="yes" onchange="toggleTimeVerify(this)">
+                <label for="timeVerifyCheck">Time verification was performed against BT Speaking Clock</label>
+            </div>
+            <div id="timeVerifyFields" style="display:none;margin-top:14px;">
+                <div class="row">
+                    <div><label>BT Speaking Clock Time</label><input type="text" name="foi_verify_time" placeholder="e.g. 09:30:00"></div>
+                    <div><label>NVR System Time at Verification</label><input type="text" name="foi_system_time" placeholder="e.g. 09:29:45"></div>
+                </div>
+                <div><label>Offset / Difference</label><input type="text" name="foi_time_offset" placeholder="e.g. 15 seconds slow"></div>
+                <div class="info-box" style="margin-top:10px;">ℹ️ Date/Time verification will be auto-populated within the statement if synced.</div>
+            </div>
+        </div>
+
+        <!-- S12: Authorisation -->
+        <div class="section">
+            <h3>👤 Section 12 · Authorisation — Completed By</h3>
+            <div class="row">
+                <div><label>Full Name</label><input type="text" name="witness_name" value="{{ session.user_name }}" required></div>
+                <div><label>Role</label><input type="text" name="witness_role" value="{{ session.user_role }}" required></div>
+            </div>
+            <div class="row">
+                <div><label>Date</label><input type="text" name="statement_date" value="{{ today }}" required></div>
+                <div><label>Contact</label><input type="text" name="witness_contact" placeholder="Email or extension"></div>
+            </div>
+        </div>
+
+        <button type="submit" class="submit-btn" id="foiSubmitBtn">📋 Generate Disclosure Record</button>
+
+        <div id="loadingBox">
+            <div style="font-size:36px;margin-bottom:12px;">⏳</div>
+            <div style="font-size:16px;font-weight:700;color:#e6edf3;margin-bottom:8px;">Generating Disclosure Record...</div>
+            <div style="font-size:13px;color:#8b949e;">Building your document — this is instant.</div>
+        </div>
+
+    </form>
+</div>
+
+<div id="successBox" style="display:none;max-width:820px;margin:0 auto;padding:0 20px 80px;">
+    <div style="background:#120a1f;border:1px solid #8a5cf6;border-radius:10px;padding:30px;text-align:center;">
+        <div style="font-size:44px;margin-bottom:12px;">✅</div>
+        <div style="font-size:20px;font-weight:700;color:#8a5cf6;margin-bottom:6px;">Disclosure Record Generated</div>
+        <div style="font-size:13px;color:#8b949e;margin-bottom:24px;">Your document is downloading now.</div>
+        <a href="/" style="background:#21262d;color:#e6edf3;padding:14px 22px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">← Back to Bookmarks</a>
+    </div>
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
+        <div style="font-size:13px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #21262d;">Email Disclosure Record</div>
+        <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:end;">
+            <div>
+                <div style="font-size:11px;color:#8b949e;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Recipient Name</div>
+                <input type="text" id="foiEmailRecipName" placeholder="e.g. john.smith" style="width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
+            </div>
+            <div style="padding-bottom:2px;font-size:18px;color:#484f58;text-align:center;">@</div>
+            <div>
+                <div style="font-size:11px;color:#8b949e;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Domain</div>
+                <select id="foiEmailDomain" style="width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
+                    <option value="rotherham.gov.uk">rotherham.gov.uk</option>
+                    <option value="southyorkshire.police.uk">southyorkshire.police.uk</option>
+                </select>
+            </div>
+        </div>
+        <div id="foiEmailStatus" style="font-size:13px;margin-top:10px;min-height:20px;"></div>
+        <button onclick="sendFoiEmail()" id="sendFoiEmailBtn" style="width:100%;margin-top:12px;padding:12px;background:#2a1a4a;color:#8a5cf6;border:1px solid #6e40c9;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
+            Send Disclosure Record by Email
+        </button>
+    </div>
+</div>
+<script>
+// ── FOI clock ─────────────────────────────────────────────────────────────────
+function foiGetUKTime() {
+    var now = new Date();
+    function lastSun(y,m){var d=new Date(Date.UTC(y,m,31));d.setUTCDate(31-d.getUTCDay());return d;}
+    var y=now.getUTCFullYear();
+    var isBST=now>=lastSun(y,2)&&now<lastSun(y,9);
+    var uk=new Date(now.getTime()+(isBST?1:0)*3600000);
+    var hh=String(uk.getUTCHours()).padStart(2,'0');
+    var mm=String(uk.getUTCMinutes()).padStart(2,'0');
+    var ss=String(uk.getUTCSeconds()).padStart(2,'0');
+    var months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    var ld=document.getElementById('foiLiveDate');
+    var lt=document.getElementById('foiLiveTime');
+    var tz=document.getElementById('foiTzLabel');
+    if(ld) ld.textContent=uk.getUTCDate()+' '+months[uk.getUTCMonth()]+' '+uk.getUTCFullYear();
+    if(lt) lt.textContent=hh+':'+mm+':'+ss;
+    if(tz) tz.textContent=(isBST?'BST':'GMT')+' · Updates every second';
+}
+foiGetUKTime();
+setInterval(foiGetUKTime, 1000);
+
+function foiFetchServerTime(){
+    fetch('/server-time').then(function(r){return r.json();}).then(function(d){
+        var sd=document.getElementById('foiServerDate');
+        var sh=document.getElementById('foiServerHHMM');
+        var ss=document.getElementById('foiServerSS');
+        var df=document.getElementById('foiServerDiff');
+        var lt=document.getElementById('foiLiveTime');
+        if(sd) sd.textContent=d.date;
+        if(sh) sh.textContent=d.time.split(':')[0]+':'+d.time.split(':')[1]+':';
+        if(ss) ss.textContent=d.time.split(':')[2];
+        if(lt && df){
+            var bt=lt.textContent;
+            if(bt && bt!=='--:--:--'){
+                var b=bt.split(':').map(Number);
+                var s=d.time.split(':').map(Number);
+                var diff=(s[0]*3600+s[1]*60+s[2])-(b[0]*3600+b[1]*60+b[2]);
+                var abs=Math.abs(diff);
+                var dm=Math.floor(abs/60),ds=abs%60;
+                df.textContent=abs<10?'Within 10 seconds — accurate':(dm>0?'Server '+(diff>0?'fast':'slow')+' by '+dm+'m '+ds+'s':'Server '+(diff>0?'fast':'slow')+' by '+ds+'s');
+            }
+        }
+    }).catch(function(){
+        var df=document.getElementById('foiServerDiff');
+        if(df) df.textContent='Could not reach server';
+    });
+}
+foiFetchServerTime();
+setInterval(foiFetchServerTime, 5000);
+
+// ── FOI sync button ───────────────────────────────────────────────────────────
+function foiUseTheseTimes() {
+    var btTime  = document.getElementById('foiLiveTime').textContent;
+    var hhmm    = document.getElementById('foiServerHHMM').textContent;
+    var secPart = document.getElementById('foiServerSS').textContent;
+    var srvTime = hhmm + secPart;
+    if (btTime === '--:--:--' || srvTime === '--:--:--') {
+        alert('Times not yet loaded — wait a moment and try again.');
+        return;
+    }
+    var cb = document.getElementById('timeVerifyCheck');
+    if (cb) { cb.checked = true; toggleTimeVerify(cb); }
+    var bf = document.querySelector('[name="foi_verify_time"]');
+    var nf = document.querySelector('[name="foi_system_time"]');
+    var df = document.querySelector('[name="foi_time_offset"]');
+    if (bf) bf.value = btTime;
+    if (nf) nf.value = srvTime;
+    var b = btTime.split(':').map(Number);
+    var s = srvTime.split(':').map(Number);
+    var diffSecs = (s[0]*3600+s[1]*60+s[2]) - (b[0]*3600+b[1]*60+b[2]);
+    var absDiff  = Math.abs(diffSecs);
+    var dMins = Math.floor(absDiff / 60);
+    var dSecs = absDiff % 60;
+    if (df) {
+        if (absDiff < 10)   df.value = 'Less than 10 seconds — accurate';
+        else if (dMins > 0) df.value = dMins + ' minute' + (dMins > 1 ? 's' : '') + ' and ' + dSecs + ' seconds ' + (diffSecs > 0 ? 'fast' : 'slow');
+        else                df.value = dSecs + ' seconds ' + (diffSecs > 0 ? 'fast' : 'slow');
+    }
+    var gs = document.querySelector('.green-section');
+    if (gs) gs.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+// ── Legal basis badge ─────────────────────────────────────────────────────────
+function updateLegalBasis() {
+    var typeEl = document.getElementById('foiRequestType');
+    var identYes = document.getElementById('identifiableYes');
+    var badge = document.getElementById('legalBadge');
+    var warning = document.getElementById('identifiableWarning');
+    var display = document.getElementById('legalDisplay');
+    if(!typeEl || !identYes) return;
+    var type = typeEl.value;
+    var identifiable = identYes.checked;
+    if(warning) warning.style.display = identifiable ? 'block' : 'none';
+    var text = '';
+    if (identifiable) {
+        text = 'UK GDPR Art.6(1)(f) / DPA 2018 — Data Protection';
+    } else if (type === 'Public') {
+        text = 'FOIA 2000';
+    } else if (type === 'Solicitor' || type === 'Insurance') {
+        text = 'DPA 2018 Schedule 2 — Legal Claims';
+    } else {
+        text = 'UK GDPR Art.6(1)(c) — Legal Obligation';
+    }
+    if(badge) badge.textContent = text;
+    if(display) display.value = text;
+}
+
+// ── Time verify toggle ────────────────────────────────────────────────────────
+function toggleTimeVerify(cb) {
+    var f = document.getElementById('timeVerifyFields');
+    if (f) f.style.display = cb.checked ? 'block' : 'none';
+}
+
+// ── Form submit ───────────────────────────────────────────────────────────────
+var foiForm = document.getElementById('foiForm');
+var _foiDocToken = null;
+if (foiForm) foiForm.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var btn = document.getElementById('foiSubmitBtn');
+    btn.disabled = true; btn.textContent = '⏳ Generating...';
+    document.getElementById('loadingBox').style.display = 'block';
+    fetch(window.location.href, {method:'POST', body: new FormData(this)})
+        .then(function(r) {
+            if (!r.ok) throw new Error('Server error ' + r.status);
+            _foiDocToken = r.headers.get('X-Doc-Token');
+            return r.blob();
+        })
+        .then(function(blob) {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a'); a.href = url;
+            a.download = 'foi_disclosure_record.docx';
+            document.body.appendChild(a); a.click();
+            document.body.removeChild(a); URL.revokeObjectURL(url);
+            document.getElementById('loadingBox').style.display = 'none';
+            document.querySelector('.container').style.display  = 'none';
+            document.getElementById('successBox').style.display = 'block';
+        })
+        .catch(function(err) {
+            document.getElementById('loadingBox').innerHTML =
+                '<div style="color:#f85149;font-size:15px;margin-bottom:12px;">❌ ' + err.message + '</div>' +
+                '<button onclick="location.reload()" style="background:#21262d;color:#e6edf3;padding:10px 20px;border-radius:6px;border:none;cursor:pointer;">Try Again</button>';
+        });
+});
+
+function sendFoiEmail() {
+    var name   = document.getElementById('foiEmailRecipName').value.trim();
+    var domain = document.getElementById('foiEmailDomain').value;
+    var status = document.getElementById('foiEmailStatus');
+    var btn    = document.getElementById('sendFoiEmailBtn');
+    if (!name) { status.style.color='#f85149'; status.textContent='Please enter a recipient name.'; return; }
+    if (!_foiDocToken) { status.style.color='#f85149'; status.textContent='No document token — please regenerate the record.'; return; }
+    btn.disabled = true; btn.textContent = '⏳ Sending...';
+    status.style.color = '#8b949e'; status.textContent = 'Sending to ' + name + '@' + domain + '...';
+    fetch('/send-email', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: _foiDocToken, recipient_name: name, recipient_domain: domain})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) {
+            status.style.color = '#8a5cf6';
+            status.textContent = '✅ Email sent successfully to ' + data.recipient;
+            btn.textContent = 'Send Another Copy';
+            btn.disabled = false;
+        } else {
+            status.style.color = '#f85149';
+            status.textContent = '❌ ' + data.error;
+            btn.textContent = 'Send Disclosure Record by Email';
+            btn.disabled = false;
+        }
+    })
+    .catch(function(err) {
+        status.style.color = '#f85149';
+        status.textContent = '❌ Network error: ' + err.message;
+        btn.textContent = 'Send Disclosure Record by Email';
+        btn.disabled = false;
+    });
+}
+</script>
+</body></html>"""
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/login", methods=["GET","POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username","").strip().lower()
+        password = request.form.get("password","")
+        if check_password(username, password):
+            session["username"]  = username
+            session["user_name"] = USERS[username]["name"]
+            session["user_role"] = USERS[username]["role"]
+            session["initials"]  = USERS[username]["initials"]
+            return redirect(url_for("index"))
+        error = "Invalid username or password."
+    return render_template_string(LOGIN_HTML, error=error, site_ref=SITE_REF)
+
+@app.route("/logout")
+def logout():
+    session.clear(); return redirect(url_for("login"))
+
+@app.route("/")
+@login_required
+def index():
+    return render_template_string(BOOKMARKS_HTML, bookmarks=get_bookmarks(), session=session, site_ref=SITE_REF)
+
+@app.route("/form/<int:bookmark_id>")
+@login_required
+def form(bookmark_id):
+    return redirect(url_for("syp", bookmark_id=bookmark_id))
+
+@app.route("/syp/<int:bookmark_id>", methods=["GET","POST"])
+@login_required
+def syp(bookmark_id):
+    return _statement_handler(bookmark_id, pipeline="syp")
+
+@app.route("/rmbc/<int:bookmark_id>", methods=["GET","POST"])
+@login_required
+def rmbc(bookmark_id):
+    return _statement_handler(bookmark_id, pipeline="rmbc")
+
+def _statement_handler(bookmark_id, pipeline):
+    bm = get_bookmark(bookmark_id)
+    if not bm: return redirect(url_for("index"))
+    if request.method == "POST":
+        form_data     = request.form.to_dict()
+        download_time = datetime.now(timezone.utc)
+        try:
+            statement_text = generate_statement(bm, form_data, download_time)
+            docx_buf       = build_docx(statement_text, form_data, download_time)
+            witness_name   = form_data.get("witness_name", "Officer")
+            bookmark_name  = bm.get("name", "statement")
+            date_str  = download_time.strftime("%Y-%m-%d_%H-%M")
+            safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in witness_name)
+            safe_bm   = "".join(c if c.isalnum() or c in "-_" else "_" for c in bookmark_name)
+            pipeline_tag = "SYP" if pipeline == "syp" else "RMBC"
+            filename  = f"{date_str}_{pipeline_tag}_{safe_name}_{safe_bm}.docx"
+            # Save to temp for email feature
+            doc_token = str(uuid.uuid4())
+            tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
+            with open(tmp_path, "wb") as f:
+                f.write(docx_buf.getvalue())
+            _TEMP_DOCS[doc_token] = (tmp_path, filename)
+            docx_buf.seek(0)
+            resp = send_file(docx_buf, as_attachment=True, download_name=filename,
+                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            resp.headers["X-Doc-Token"] = doc_token
+            resp.headers["Access-Control-Expose-Headers"] = "X-Doc-Token"
+            return resp
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            route = "syp" if pipeline == "syp" else "rmbc"
+            return (f"<html><body style='font-family:Arial;padding:40px;background:#0d1117;color:#f85149;'>"
+                    f"<h2>Error: {str(e)}</h2>"
+                    f"<pre style='color:#f85149;font-size:12px;margin-top:20px;white-space:pre-wrap;'>{traceback.format_exc()}</pre>"
+                    f"<a href='/{route}/{bookmark_id}' style='color:#58a6ff;'>← Try again</a>"
+                    f"</body></html>"), 500
+    today    = datetime.now().strftime("%d/%m/%Y")
+    initials = session.get("initials", "XX")
+    return render_template_string(FORM_HTML, bm=bm, session=session, today=today,
+                                  locations=LOCATIONS, initials=initials, pipeline=pipeline)
+
+@app.route("/foi/<int:bookmark_id>", methods=["GET","POST"])
+@login_required
+def foi(bookmark_id):
+    bm = get_bookmark(bookmark_id)
+    if not bm: return redirect(url_for("index"))
+    if request.method == "POST":
+        form_data     = request.form.to_dict()
+        download_time = datetime.now(timezone.utc)
+        try:
+            foi_data = assemble_foi_data(bm, form_data, download_time)
+            docx_buf = build_foi_docx(foi_data, download_time)
+            witness_name = form_data.get("witness_name", "Officer")
+            date_str  = download_time.strftime("%Y-%m-%d_%H-%M")
+            safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in witness_name)
+            filename  = f"{date_str}_{safe_name}_FOI_Disclosure.docx"
+            doc_token = str(uuid.uuid4())
+            tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
+            with open(tmp_path, "wb") as f:
+                f.write(docx_buf.getvalue())
+            _TEMP_DOCS[doc_token] = (tmp_path, filename)
+            docx_buf.seek(0)
+            resp = send_file(docx_buf, as_attachment=True, download_name=filename,
+                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            resp.headers["X-Doc-Token"] = doc_token
+            resp.headers["Access-Control-Expose-Headers"] = "X-Doc-Token"
+            return resp
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return (f"<html><body style='font-family:Arial;padding:40px;background:#0d1117;color:#f85149;'>"
+                    f"<h2>Error: {str(e)}</h2>"
+                    f"<pre style='color:#f85149;font-size:12px;margin-top:20px;white-space:pre-wrap;'>{traceback.format_exc()}</pre>"
+                    f"<a href='/foi/{bookmark_id}' style='color:#58a6ff;'>← Try again</a>"
+                    f"</body></html>"), 500
+    today    = datetime.now().strftime("%d/%m/%Y")
+    initials = session.get("initials", "XX")
+    return render_template_string(FOI_FORM_HTML, bm=bm, session=session,
+                                  today=today, initials=initials, site_ref=SITE_REF)
+
+@app.route("/send-email", methods=["POST"])
+@login_required
+def send_email():
+    try:
+        data       = request.get_json()
+        token      = data.get("token", "")
+        recip_name = data.get("recipient_name", "").strip()
+        recip_dom  = data.get("recipient_domain", "rotherham.gov.uk")
+        recipient  = f"{recip_name}@{recip_dom}"
+
+        if not token or token not in _TEMP_DOCS:
+            return jsonify({"ok": False, "error": "Document not found — please regenerate the statement first."})
+        if not recip_name:
+            return jsonify({"ok": False, "error": "Please enter a recipient name."})
+        if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+            return jsonify({"ok": False, "error": "Email not configured on this server. Add GMAIL_USER and GMAIL_APP_PASSWORD to .env"})
+
+        tmp_path, filename = _TEMP_DOCS[token]
+        if not os.path.exists(tmp_path):
+            return jsonify({"ok": False, "error": "Temporary file expired — please regenerate the statement."})
+
+        # Build email
+        msg = MIMEMultipart()
+        msg["From"]    = GMAIL_USER
+        msg["To"]      = recipient
+        msg["Subject"] = f"RMBC CCTV — Witness Statement — {SITE_REF}"
+
+        body = (
+            f"Please find attached the CCTV witness statement generated by RMBC CCTV Evidence Management.\n\n"
+            f"This document has been prepared by {session.get('user_name', 'RMBC CCTV')} "
+            f"and is marked OFFICIAL SENSITIVE.\n\n"
+            f"System Reference: {SITE_REF}\n"
+            f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+            f"Please do not reply to this email. For queries contact the RMBC CCTV team directly."
+        )
+        msg.attach(MIMEText(body, "plain"))
+
+        with open(tmp_path, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+        msg.attach(part)
+
+        # Send via Gmail SMTP TLS
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_USER, recipient, msg.as_string())
+
+        # Clean up temp file after send
+        try:
+            os.remove(tmp_path)
+            del _TEMP_DOCS[token]
+        except Exception:
+            pass
+
+        return jsonify({"ok": True, "recipient": recipient})
+
+    except smtplib.SMTPAuthenticationError:
+        return jsonify({"ok": False, "error": "Gmail authentication failed. Check GMAIL_USER and GMAIL_APP_PASSWORD in .env"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/server-time")
+def server_time():
+    now = datetime.now()
+    return jsonify({"date": now.strftime("%d/%m/%Y"), "time": now.strftime("%H:%M:%S")})
+
+if __name__ == "__main__":
+    if not ANTHROPIC_KEY:
+        print("\n⚠️  WARNING: ANTHROPIC_API_KEY not set.\n")
+    print(f"\n🎥 RMBC CCTV Evidence Management — {SITE_REF}")
+    print("   http://0.0.0.0:5000\n")
+    app.run(host="0.0.0.0", port=5000, debug=False)
