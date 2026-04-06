@@ -6,11 +6,11 @@
 ## What You Need Before Starting
 
 - `cctv_app.py` — the Flask application (on your Windows Desktop)
-- Your Anthropic API key (starts with `sk-ant-...`) — have it ready, do not paste it here
+- Your Anthropic API key (starts with `sk-ant-...`) — have it ready
 - SSH access to the server via Tailscale or local IP
 - Server user: `rmbc` with sudo privileges
 
-> **Important:** This guide uses password authentication only. No SSH keys. No `-i` flags. No root SCP.
+> **Important:** Password authentication only. No SSH keys. No `-i` flags. No root SCP.
 
 ---
 
@@ -20,6 +20,7 @@
 |--------|-------|
 | App directory | `/opt/CCTV_Statement/` |
 | Python environment | `/opt/CCTV_Statement/venv/` |
+| API key file | `/opt/CCTV_Statement/.env` |
 | Service name | `cctv-statement` |
 | Port | `5000` |
 | Runs as | `root` (via systemd) |
@@ -35,9 +36,7 @@ From your Windows machine (PowerShell or Command Prompt):
 ssh rmbc@100.69.64.113
 ```
 
-Enter your password when prompted.
-
-Then switch to root:
+Enter your password when prompted. Then switch to root:
 
 ```
 sudo -i
@@ -59,8 +58,8 @@ This may take a few minutes on a fresh server.
 
 ## Step 3 — Install Python and Virtual Environment Support
 
-> **Do NOT use `pip3 install` directly on Ubuntu 24.04 — it will fail or conflict.**
-> Always use a virtual environment. This is the correct method.
+> **Do NOT use `pip3 install` directly on Ubuntu 24.04 — it will fail.**
+> Always use a virtual environment.
 
 ```
 apt install -y python3 python3-pip python3-venv
@@ -119,7 +118,7 @@ python3 -m venv /opt/CCTV_Statement/venv
 /opt/CCTV_Statement/venv/bin/pip install flask python-docx requests
 ```
 
-Verify Flask is installed:
+Verify Flask installed correctly:
 
 ```
 /opt/CCTV_Statement/venv/bin/python3 -c "import flask; print(flask.__version__)"
@@ -129,10 +128,37 @@ Should print a version number with no errors.
 
 ---
 
-## Step 7 — Test It Runs Manually First
+## Step 7 — Create the API Key Environment File
+
+> **This is the correct method for Ubuntu 24.04.**
+> Do NOT put the key directly in the systemd service file using Environment= — it will not be passed to the process reliably.
+> Always use EnvironmentFile= pointing to a .env file.
+
+```
+nano /opt/CCTV_Statement/.env
+```
+
+Add this single line with your actual key:
+
+```
+ANTHROPIC_API_KEY=sk-ant-YOUR_FULL_KEY_HERE
+```
+
+Save with `Ctrl+X` then `Y` then `Enter`
+
+Lock down the file so only root can read it:
+
+```
+chmod 600 /opt/CCTV_Statement/.env
+```
+
+---
+
+## Step 8 — Test It Runs Manually First
 
 ```
 cd /opt/CCTV_Statement
+source /opt/CCTV_Statement/.env
 /opt/CCTV_Statement/venv/bin/python3 cctv_app.py
 ```
 
@@ -150,9 +176,9 @@ If it loads, press `Ctrl+C` to stop it before continuing.
 
 ---
 
-## Step 8 — Open the Firewall Port
+## Step 9 — Open the Firewall Port
 
-> This step is required. Port 5000 is not open by default.
+> This step is required. Port 5000 is not open by default on Ubuntu 24.04.
 
 ```
 ufw allow 5000/tcp
@@ -164,10 +190,10 @@ You should see `5000/tcp ALLOW Anywhere` in the list.
 
 ---
 
-## Step 9 — Create the Systemd Service
+## Step 10 — Create the Systemd Service
 
 > We use `sudo bash -c` because writing to `/etc/systemd/system/` requires root.
-> Replace `YOUR_API_KEY` with your actual `sk-ant-...` key before running.
+> EnvironmentFile= is used — this is the only reliable way to pass the API key to the process on Ubuntu 24.04.
 
 ```
 sudo bash -c 'cat > /etc/systemd/system/cctv-statement.service << EOF
@@ -179,7 +205,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/CCTV_Statement
-Environment="ANTHROPIC_API_KEY=YOUR_API_KEY"
+EnvironmentFile=/opt/CCTV_Statement/.env
 ExecStart=/opt/CCTV_Statement/venv/bin/python3 /opt/CCTV_Statement/cctv_app.py
 Restart=on-failure
 RestartSec=5
@@ -191,7 +217,7 @@ EOF'
 
 ---
 
-## Step 10 — Enable and Start the Service
+## Step 11 — Enable and Start the Service
 
 ```
 systemctl daemon-reload
@@ -202,11 +228,21 @@ systemctl status cctv-statement
 
 Should show **active (running)** in green.
 
-The `enable` command ensures the service **automatically starts on every reboot or restart** — no manual intervention needed.
+The `enable` command ensures the service **automatically starts on every reboot** — no manual intervention needed.
 
 ---
 
-## Step 11 — Reboot Test
+## Step 12 — Verify the API Key Is Reaching the Process
+
+```
+sudo cat /proc/$(pgrep -f cctv_app)/environ | tr '\0' '\n' | grep ANTHROPIC
+```
+
+Should print your full API key. If blank — the `.env` file has a problem. Check Step 7.
+
+---
+
+## Step 13 — Reboot Test
 
 ```
 reboot
@@ -240,9 +276,7 @@ Login credentials:
 
 ## Updating the App (Future Versions)
 
-When you have a new `cctv_app.py`:
-
-From Windows — upload it:
+When you have a new `cctv_app.py`, from Windows:
 
 ```
 scp C:\Users\Dane\Desktop\cctv_app.py rmbc@100.69.64.113:/home/rmbc/cctv_app.py
@@ -268,6 +302,7 @@ sudo systemctl status cctv-statement
 | Check status | `systemctl status cctv-statement` |
 | Check port open | `ss -tlnp \| grep 5000` |
 | Check firewall | `ufw status` |
+| Verify API key live | `sudo cat /proc/$(pgrep -f cctv_app)/environ \| tr '\0' '\n' \| grep ANTHROPIC` |
 | Check line count | `wc -l /opt/CCTV_Statement/cctv_app.py` |
 | Check routes | `grep -n "@app.route" /opt/CCTV_Statement/cctv_app.py` |
 | Test Flask import | `/opt/CCTV_Statement/venv/bin/python3 -c "import flask; print(flask.__version__)"` |
@@ -278,10 +313,12 @@ sudo systemctl status cctv-statement
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `No module named 'flask'` | pip installed to wrong Python | Reinstall using venv pip: `/opt/CCTV_Statement/venv/bin/pip install flask python-docx requests` |
-| `Permission denied` writing service file | Not using sudo | Use `sudo bash -c 'cat > ...'` as shown in Step 9 |
+| `No module named 'flask'` | pip installed to wrong Python | Use venv pip: `/opt/CCTV_Statement/venv/bin/pip install flask python-docx requests` |
+| `Permission denied` writing service file | Not using sudo | Use `sudo bash -c 'cat > ...'` as shown in Step 10 |
 | Browser refuses to connect | Port 5000 not open | Run `ufw allow 5000/tcp && ufw reload` |
-| Service shows `failed` | API key not set or wrong path | Check `Environment=` line in service file and that ExecStart points to venv python |
+| 500 error generating statement | API key not reaching process | Check `.env` file exists, run Step 12 to verify |
+| API key blank in process | Used `Environment=` instead of `EnvironmentFile=` | Rewrite service file using `EnvironmentFile=` as shown in Step 10 |
+| 401 Unauthorized from Anthropic | Wrong or expired API key | Test key with curl, regenerate at console.anthropic.com if needed |
 | Service not starting after reboot | Not enabled | Run `systemctl enable cctv-statement` |
 
 ---
@@ -313,10 +350,10 @@ The app reads bookmarks from:
 /opt/networkoptix/mediaserver/var/mserver.sqlite
 ```
 
-On a development or test server this file will not exist — the bookmark list will be empty. This is expected. The app will still load and run correctly. Bookmarks will appear once the server is pointed at a real Nx Witness installation.
+On a development or test server this file will not exist — the bookmark list will be empty. This is expected. The app will still load and run correctly. Bookmarks will appear once pointed at a real Nx Witness installation.
 
 ---
 
 ## What's Next — Docker Streamlined Install
 
-Once the script is finalised, the install process will be streamlined using Docker so that deploying to any server is a minimal number of commands. This will make deploying to multiple servers significantly faster with no manual dependency management required.
+Once the script is finalised, the install process will be streamlined using Docker so that deploying to any server takes just a couple of commands — no manual dependency management required.
