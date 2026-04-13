@@ -99,7 +99,7 @@ Verify it arrived correctly:
 wc -l /opt/CCTV_Statement/cctv_app.py
 ```
 
-Should say **1007**. If lower, the transfer cut short — repeat the SCP.
+Should say **2297**. If lower, the transfer cut short — repeat the SCP.
 
 Check routes are present:
 
