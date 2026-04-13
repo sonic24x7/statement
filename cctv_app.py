@@ -148,6 +148,13 @@ def get_bookmark(record_id):
 
 def generate_statement(bm, form, download_time):
 
+    if not ANTHROPIC_KEY:
+        raise ValueError(
+            "ANTHROPIC_API_KEY is not set. "
+            "Add it to /opt/CCTV_Statement/.env and restart the service: "
+            "systemctl restart cctv-statement"
+        )
+
     # Reference line
     ref_parts = []
     if form.get("crime_name"):   ref_parts.append(form["crime_name"])

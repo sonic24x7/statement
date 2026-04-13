@@ -138,11 +138,15 @@ Should print a version number with no errors.
 nano /opt/CCTV_Statement/.env
 ```
 
-Add this single line with your actual key:
+Add these lines — replace the values with your actual credentials:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-YOUR_FULL_KEY_HERE
+GMAIL_USER=rmbcvms@gmail.com
+GMAIL_APP_PASSWORD=your-16-char-app-password
 ```
+
+> **Note:** `GMAIL_USER` and `GMAIL_APP_PASSWORD` are required for the email feature (v6.1+). If you leave them blank the app will still run and generate statements, but the "Send by Email" button will return an error.
 
 Save with `Ctrl+X` then `Y` then `Enter`
 
@@ -158,9 +162,11 @@ chmod 600 /opt/CCTV_Statement/.env
 
 ```
 cd /opt/CCTV_Statement
-source /opt/CCTV_Statement/.env
+set -a && source /opt/CCTV_Statement/.env && set +a
 /opt/CCTV_Statement/venv/bin/python3 cctv_app.py
 ```
+
+> **Why `set -a`?** Without it, `source` sets the variables only as shell variables — they are **not** exported to child processes. Python would read them as empty. `set -a` turns on auto-export so every variable set by `source` is automatically exported.
 
 You should see:
 
