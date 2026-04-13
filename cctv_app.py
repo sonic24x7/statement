@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v6.5 — Wasabi cloud upload for all 3 pipelines)
+cctv_app.py  (v6.6 — GUI: [C]/[D] cloud badges on bookmark list; marker-aware delivery block)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -996,6 +996,9 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:
 .btn-foi{background:#2a1a4a;color:#8a5cf6;border:1px solid #6e40c9;}
 .btn-foi:hover{background:#6e40c9;color:white;}
 .id-badge{background:#1f2937;color:#484f58;padding:2px 6px;border-radius:4px;font-size:10px;font-family:'DM Mono',monospace;margin-left:6px;}
+.cloud-tag{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;font-family:'DM Mono',monospace;margin-left:6px;vertical-align:middle;}
+.cloud-tag-c{background:#0d2b0d;color:#3fb950;border:1px solid #238636;}
+.cloud-tag-d{background:#2d1f00;color:#d29922;border:1px solid #d29922;}
 .empty{text-align:center;padding:60px;color:#484f58;}
 @media(max-width:600px){
   .bm{flex-direction:column;align-items:flex-start;}
@@ -1057,7 +1060,7 @@ function toggleSidebar(){
         {% for bm in bookmarks %}
         <div class="bm">
             <div class="bm-info">
-                <div class="bm-name">{{ bm.name or "(No name)" }}<span class="id-badge">{{ bm.record_id }}</span></div>
+                <div class="bm-name">{{ bm.name or "(No name)" }}<span class="id-badge">{{ bm.record_id }}</span>{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}<span class="cloud-tag cloud-tag-c">&#9729; Cloud</span>{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}<span class="cloud-tag cloud-tag-d">&#8987; Deferred</span>{% endif %}</div>
                 <div class="bm-desc">{{ bm.description or "No description" }}</div>
                 <div class="bm-time">{{ bm.start_fmt }} → {{ bm.end_fmt }}</div>
             </div>
@@ -1456,8 +1459,9 @@ function toggleSidebar(){
         <!-- ── Cloud delivery options ──────────────────────────────────── -->
         {% if wasabi_found %}
         <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
-            <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:10px;">☁️ Statement Delivery</div>
-            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">✅ Footage confirmed in Wasabi cloud for this bookmark</div>
+            <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:4px;">&#9729;&#65039; Statement Delivery</div>
+            <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
+            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">&#10003; Footage confirmed in Wasabi cloud for this bookmark</div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
                     <input type="radio" name="delivery" value="download" checked style="width:auto;"> ⬇️ Download only
@@ -1473,14 +1477,20 @@ function toggleSidebar(){
         </div>
         {% else %}
         <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
-            <div style="font-size:12px;color:#8b949e;">☁️ No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>. If deferred [D] upload was selected, check again after 06:00.</div>
+            {% if '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}
+            <div style="font-size:12px;color:#8b949e;">&#8987; <strong style="color:#d29922;">[D] Deferred upload</strong> — footage not yet in cloud. Check again after 06:00. <strong style="color:#e6edf3;">Download only for now.</strong></div>
+            {% elif '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}
+            <div style="font-size:12px;color:#8b949e;">&#9888;&#65039; <strong style="color:#f85149;">[C] Cloud bookmark</strong> — footage not found in cloud. <strong style="color:#e6edf3;">Download only.</strong> Contact CCTV team if upload is expected.</div>
+            {% else %}
+            <div style="font-size:12px;color:#8b949e;">&#9729;&#65039; No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>.</div>
+            {% endif %}
             <input type="hidden" name="delivery" value="download">
             <input type="hidden" name="wasabi_prefix" value="">
         </div>
         {% endif %}
         <!-- ───────────────────────────────────────────────────────────────── -->
 
-        <button type="submit" class="submit-btn" id="submitBtn" disabled style="opacity:0.5;cursor:not-allowed;">⚡ Generate Witness Statement</button>
+        <button type="submit" class="submit-btn" id="submitBtn" disabled style="opacity:0.5;cursor:not-allowed;">&#9889; Generate Witness Statement</button>
 
         <div id="loadingBox">
             <div style="font-size:36px;margin-bottom:12px;">⏳</div>
@@ -2067,8 +2077,9 @@ function toggleSidebar(){
         <!-- ── Cloud delivery options (FOI) ───────────────────────────────── -->
         {% if wasabi_found %}
         <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
-            <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:10px;">☁️ Disclosure Record Delivery</div>
-            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">✅ Footage confirmed in Wasabi cloud for this bookmark</div>
+            <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:4px;">&#9729;&#65039; Disclosure Record Delivery</div>
+            <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
+            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">&#10003; Footage confirmed in Wasabi cloud for this bookmark</div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
                     <input type="radio" name="delivery" value="download" checked style="width:auto;"> ⬇️ Download only
@@ -2084,14 +2095,20 @@ function toggleSidebar(){
         </div>
         {% else %}
         <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
-            <div style="font-size:12px;color:#8b949e;">☁️ No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>. If deferred [D] upload was selected, check again after 06:00.</div>
+            {% if '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}
+            <div style="font-size:12px;color:#8b949e;">&#8987; <strong style="color:#d29922;">[D] Deferred upload</strong> — footage not yet in cloud. Check again after 06:00. <strong style="color:#e6edf3;">Download only for now.</strong></div>
+            {% elif '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}
+            <div style="font-size:12px;color:#8b949e;">&#9888;&#65039; <strong style="color:#f85149;">[C] Cloud bookmark</strong> — footage not found in cloud. <strong style="color:#e6edf3;">Download only.</strong> Contact CCTV team if upload is expected.</div>
+            {% else %}
+            <div style="font-size:12px;color:#8b949e;">&#9729;&#65039; No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>.</div>
+            {% endif %}
             <input type="hidden" name="delivery" value="download">
             <input type="hidden" name="wasabi_prefix" value="">
         </div>
         {% endif %}
         <!-- ───────────────────────────────────────────────────────────────── -->
 
-        <button type="submit" class="submit-btn" id="foiSubmitBtn">📋 Generate Disclosure Record</button>
+        <button type="submit" class="submit-btn" id="foiSubmitBtn">&#128203; Generate Disclosure Record</button>
 
         <div id="loadingBox">
             <div style="font-size:36px;margin-bottom:12px;">⏳</div>
