@@ -1,6 +1,13 @@
 """
-cctv_app.py  (v6.1 — email feature added)
+cctv_app.py  (v6.2 — local Ollama AI backend added)
 ================================================
+Changes from v6.1:
+- AI_BACKEND config: set to "anthropic" (default) or "ollama" in .env
+- Ollama support: calls local Ollama API (http://localhost:11434) when AI_BACKEND=ollama
+- No data leaves the building when using Ollama — removes third-party processor concern
+- OLLAMA_MODEL defaults to llama3 but is configurable via .env
+- ANTHROPIC_API_KEY no longer required when AI_BACKEND=ollama
+
 Changes from v6:
 - Gmail SMTP email feature: send statement as .docx attachment
 - Recipient built from name input + domain dropdown
@@ -25,7 +32,10 @@ Install:
     /opt/CCTV_Statement/venv/bin/pip install flask python-docx requests
 
 .env file must contain:
-    ANTHROPIC_API_KEY=sk-ant-...
+    AI_BACKEND=anthropic          # or: ollama
+    ANTHROPIC_API_KEY=sk-ant-...  # required when AI_BACKEND=anthropic
+    OLLAMA_MODEL=llama3           # required when AI_BACKEND=ollama
+    OLLAMA_HOST=http://localhost:11434  # optional, defaults to localhost
     GMAIL_USER=rmbcvms@gmail.com
     GMAIL_APP_PASSWORD=your-16-char-app-password
 
@@ -57,6 +67,9 @@ CLAUDE_MODEL       = "claude-sonnet-4-6"
 ANTHROPIC_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")
 GMAIL_USER         = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+AI_BACKEND         = os.environ.get("AI_BACKEND", "anthropic").lower()  # "anthropic" or "ollama"
+OLLAMA_HOST        = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL", "llama3")
 
 # Temp file store: token → (filepath, filename)
 _TEMP_DOCS: dict = {}
@@ -148,11 +161,16 @@ def get_bookmark(record_id):
 
 def generate_statement(bm, form, download_time):
 
-    if not ANTHROPIC_KEY:
+    if AI_BACKEND == "anthropic" and not ANTHROPIC_KEY:
         raise ValueError(
             "ANTHROPIC_API_KEY is not set. "
             "Add it to /opt/CCTV_Statement/.env and restart the service: "
             "systemctl restart cctv-statement"
+        )
+    if AI_BACKEND == "ollama" and not OLLAMA_MODEL:
+        raise ValueError(
+            "OLLAMA_MODEL is not set. "
+            "Add OLLAMA_MODEL=llama3 to /opt/CCTV_Statement/.env and restart the service."
         )
 
     # Reference line
@@ -307,6 +325,26 @@ The footage referred to in this statement was captured by a camera installed on 
 
 {handover}"""
 
+    system_prompt = (
+        "You produce short factual UK MG11 technical CCTV witness statements. "
+        "Plain professional English. Maximum 7 paragraphs. No footage description. "
+        "Reproduce verbatim sections exactly as provided."
+    )
+
+    if AI_BACKEND == "ollama":
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": prompt},
+            ],
+            "stream": False,
+        }
+        r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, timeout=120)
+        r.raise_for_status()
+        return r.json()["message"]["content"]
+
+    # Default: Anthropic
     headers = {
         "x-api-key": ANTHROPIC_KEY,
         "anthropic-version": "2023-06-01",
@@ -315,7 +353,7 @@ The footage referred to in this statement was captured by a camera installed on 
     payload = {
         "model": CLAUDE_MODEL,
         "max_tokens": 2000,
-        "system": "You produce short factual UK MG11 technical CCTV witness statements. Plain professional English. Maximum 7 paragraphs. No footage description. Reproduce verbatim sections exactly as provided.",
+        "system": system_prompt,
         "messages": [{"role": "user", "content": prompt}],
     }
     r = requests.post(CLAUDE_API_URL, headers=headers, json=payload, timeout=120)
@@ -2290,8 +2328,10 @@ def server_time():
     return jsonify({"date": now.strftime("%d/%m/%Y"), "time": now.strftime("%H:%M:%S")})
 
 if __name__ == "__main__":
-    if not ANTHROPIC_KEY:
+    if AI_BACKEND == "anthropic" and not ANTHROPIC_KEY:
         print("\n⚠️  WARNING: ANTHROPIC_API_KEY not set.\n")
+    if AI_BACKEND == "ollama":
+        print(f"\n🤖  AI backend: Ollama ({OLLAMA_HOST}) — model: {OLLAMA_MODEL}")
     print(f"\n🎥 RMBC CCTV Evidence Management — {SITE_REF}")
     print("   http://0.0.0.0:5000\n")
     app.run(host="0.0.0.0", port=5000, debug=False)

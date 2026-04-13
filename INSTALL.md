@@ -128,7 +128,43 @@ Should print a version number with no errors.
 
 ---
 
-## Step 7 — Create the API Key Environment File
+## Step 6b — (Optional) Install Ollama for Local AI
+
+> **Skip this step if using Anthropic.** Use this instead if you want no data to leave the building — removes any third-party data processing concern.
+
+```
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3
+```
+
+Verify Ollama is running:
+
+```
+curl http://localhost:11434
+```
+
+Should return `Ollama is running`.
+
+Then in your `.env` file (Step 7), set:
+
+```
+AI_BACKEND=ollama
+OLLAMA_MODEL=llama3
+```
+
+And **remove or leave blank** the `ANTHROPIC_API_KEY` line — it is not needed.
+
+**Minimum server spec for Ollama:**
+
+| Resource | Minimum |
+|----------|---------|
+| RAM | 16 GB |
+| CPU | 4-core modern |
+| GPU | Not required (faster if present) |
+
+---
+
+## Step 7 — Create the Environment File
 
 > **This is the correct method for Ubuntu 24.04.**
 > Do NOT put the key directly in the systemd service file using Environment= — it will not be passed to the process reliably.
@@ -141,12 +177,15 @@ nano /opt/CCTV_Statement/.env
 Add these lines — replace the values with your actual credentials:
 
 ```
+AI_BACKEND=anthropic
 ANTHROPIC_API_KEY=sk-ant-YOUR_FULL_KEY_HERE
 GMAIL_USER=rmbcvms@gmail.com
 GMAIL_APP_PASSWORD=your-16-char-app-password
 ```
 
 > **Note:** `GMAIL_USER` and `GMAIL_APP_PASSWORD` are required for the email feature (v6.1+). If you leave them blank the app will still run and generate statements, but the "Send by Email" button will return an error.
+>
+> **Ollama (local AI):** To run without sending data to Anthropic, see **Step 6b** below.
 
 Save with `Ctrl+X` then `Y` then `Enter`
 
@@ -325,6 +364,7 @@ sudo systemctl status cctv-statement
 | 500 error generating statement | API key not reaching process | Check `.env` file exists, run Step 12 to verify |
 | API key blank in process | Used `Environment=` instead of `EnvironmentFile=` | Rewrite service file using `EnvironmentFile=` as shown in Step 10 |
 | 401 Unauthorized from Anthropic | Wrong or expired API key | Test key with curl, regenerate at console.anthropic.com if needed |
+| 500 error with Ollama | Ollama not running or model not pulled | Run `ollama serve` and `ollama pull llama3` |
 | Service not starting after reboot | Not enabled | Run `systemctl enable cctv-statement` |
 
 ---
