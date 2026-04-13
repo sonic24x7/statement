@@ -337,7 +337,7 @@ The footage referred to in this statement was captured by a camera installed on 
         "stream": False,
         "options": {"temperature": 0},
     }
-    r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, timeout=120)
+    r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, timeout=300)
     r.raise_for_status()
     return r.json()["message"]["content"]
 
