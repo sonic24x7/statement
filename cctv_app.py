@@ -191,6 +191,16 @@ def _wasabi_client():
         config=Config(signature_version="s3v4"),
     )
 
+def _normalise_slug(name):
+    """Normalise bookmark name to match Nx Witness Wasabi folder naming.
+    Strips [C]/[D] upload tags, lowercases, replaces non-alphanumeric with hyphens."""
+    import re
+    s = name.lower().strip()
+    s = re.sub(r'\s*\[[cdCD]\]\s*', '', s)   # remove [C] [c] [D] [d] tags
+    s = re.sub(r'[^a-z0-9]+', '-', s)         # spaces/specials → hyphens
+    s = re.sub(r'-+', '-', s).strip('-')       # collapse duplicates
+    return s
+
 def check_wasabi_footage(bookmark_slug):
     """Search Wasabi for a folder matching bookmark_slug containing video + JSON.
     Returns (True, prefix_str) or (False, None).
@@ -207,19 +217,42 @@ def check_wasabi_footage(bookmark_slug):
         has_video = False
         has_json  = False
         found_prefix = None
-        needle = f"/{bookmark_slug}/"
+        # Try exact slug first, then normalised version
+        normalised = _normalise_slug(bookmark_slug)
+        needles = list(dict.fromkeys([
+            f"/{bookmark_slug}/",
+            f"/{normalised}/",
+        ]))
         for page in paginator.paginate(Bucket=WASABI_BUCKET, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
-                if needle in key:
+                matched_needle = next((n for n in needles if n in key), None)
+                if matched_needle:
                     if found_prefix is None:
-                        idx = key.index(needle)
-                        found_prefix = key[: idx + len(needle)]
+                        idx = key.index(matched_needle)
+                        found_prefix = key[: idx + len(matched_needle)]
                     ext = key.rsplit(".", 1)[-1].lower()
                     if ext in ("mkv", "mp4"):
                         has_video = True
                     elif ext == "json":
                         has_json = True
+        if has_video and has_json and found_prefix:
+            return True, found_prefix
+        # Partial match fallback — folder name contains normalised slug
+        for page in paginator.paginate(Bucket=WASABI_BUCKET, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                parts = key.split("/")
+                # parts: ['RMBC060','automated','DD-MM-YYYY','folder-name','file']
+                if len(parts) >= 5 and normalised in parts[3]:
+                    fp = "/".join(parts[:4]) + "/"
+                    ext = key.rsplit(".", 1)[-1].lower()
+                    if ext in ("mkv", "mp4"):
+                        has_video = True
+                        found_prefix = fp
+                    elif ext == "json":
+                        has_json = True
+                        found_prefix = fp
         if has_video and has_json and found_prefix:
             return True, found_prefix
         return False, None
