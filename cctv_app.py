@@ -344,7 +344,7 @@ def generate_statement(bm, form, download_time):
     export_date = form.get("export_date", download_time.strftime("%d/%m/%Y"))
     export_time = form.get("export_time", download_time.strftime("%H:%M:%S"))
     exhibit_ref = form.get("exhibit_ref", "DCP1")
-    media_type  = form.get("media_type", "DVD disc")
+    media_type  = form.get("media_type", "Raw Data")
     is_dems     = media_type == "South Yorkshire Police DEMS Portal"
     secure_store = "Rawmarsh Police Station, Green Lane, Rawmarsh, Rotherham"
 
@@ -1342,9 +1342,9 @@ function toggleSidebar(){
                 <div>
                     <label>Transferable Media Used</label>
                     <select name="media_type" id="mediaTypeSelect">
+                        <option value="Raw Data">Raw Data</option>
                         <option value="DVD Disc">DVD Disc</option>
                         <option value="USB Device">USB Device</option>
-                        <option value="Raw Data">Raw Data</option>
                     </select>
                 </div>
             </div>
@@ -1488,6 +1488,7 @@ function toggleSidebar(){
                     <input type="radio" name="delivery" value="both" style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
                 </label>
             </div>
+            <div style="font-size:11px;color:#484f58;margin-top:12px;line-height:1.5;">Saving into the cloud package retains this bookmark's footage beyond the normal overwrite cycle under the Wasabi retention workflow.</div>
             <input type="hidden" name="wasabi_prefix" value="{{ wasabi_prefix }}">
         </div>
         {% else %}
@@ -1683,6 +1684,9 @@ function setHandover(type) {
     var show = document.getElementById('fields_' + type);
     if (show) show.style.display = 'block';
     if (type === 'person') { setTimeout(function() { var n = document.getElementById('officerName'); if (n) n.focus(); }, 100); }
+    // DEMS is a digital route — Raw Data is the correct media type
+    var mt = document.getElementById('mediaTypeSelect');
+    if (mt && type === 'dems') mt.value = 'Raw Data';
 }
 setHandover('storage');
 
@@ -1697,6 +1701,14 @@ function toggleRef(cb) {
     var f = document.getElementById('ref_fields');
     if (f) f.style.display = cb.checked ? 'none' : 'block';
 }
+
+// Cloud delivery is a digital route — auto-select Raw Data as media type
+document.querySelectorAll('input[name="delivery"]').forEach(function(r) {
+    r.addEventListener('change', function() {
+        var mt = document.getElementById('mediaTypeSelect');
+        if (mt && (this.value === 'cloud' || this.value === 'both')) mt.value = 'Raw Data';
+    });
+});
 
 var bcEl = document.getElementById('bookmarkCreator');
 if (bcEl) bcEl.addEventListener('change', function() {
@@ -2130,6 +2142,7 @@ function toggleSidebar(){
                     <input type="radio" name="delivery" value="both" style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
                 </label>
             </div>
+            <div style="font-size:11px;color:#484f58;margin-top:12px;line-height:1.5;">Saving into the cloud package retains this bookmark's footage beyond the normal overwrite cycle under the Wasabi retention workflow.</div>
             <input type="hidden" name="wasabi_prefix" value="{{ wasabi_prefix }}">
         </div>
         {% else %}
