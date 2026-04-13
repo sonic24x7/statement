@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v6.6 — GUI: [C]/[D] cloud badges on bookmark list; marker-aware delivery block)
+cctv_app.py  (v6.7 — Cloud package timeline: arrival time + statement save time shown together)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -209,20 +209,23 @@ def _normalise_slug(name):
 
 def check_wasabi_footage(bookmark_slug):
     """Search Wasabi for a folder matching bookmark_slug containing video + JSON.
-    Returns (True, prefix_str) or (False, None).
+    Returns (True, prefix_str, arrived_str) or (False, None, None).
+    arrived_str: HH:MM on DD/MM/YYYY — latest LastModified across video+JSON files,
+    representing when the cloud package was complete and available.
     Prefix format: RMBC060/automated/DD-MM-YYYY/bookmark-slug/
     # TODO: cross-pipeline review — currently always checks RMBC060/automated/
     # for all pipelines. FOI and SYP may need separate bucket paths in future.
     """
     if not WASABI_ACCESS_KEY or not WASABI_SECRET_KEY:
-        return False, None
+        return False, None, None
     try:
         s3 = _wasabi_client()
         prefix = "RMBC060/automated/"
         paginator = s3.get_paginator("list_objects_v2")
-        has_video = False
-        has_json  = False
-        found_prefix = None
+        has_video       = False
+        has_json        = False
+        found_prefix    = None
+        latest_modified = None   # tracks when the package became complete
         # Try exact slug first, then normalised version
         normalised = _normalise_slug(bookmark_slug)
         needles = list(dict.fromkeys([
@@ -242,8 +245,12 @@ def check_wasabi_footage(bookmark_slug):
                         has_video = True
                     elif ext == "json":
                         has_json = True
+                    lm = obj.get("LastModified")
+                    if lm and (latest_modified is None or lm > latest_modified):
+                        latest_modified = lm
         if has_video and has_json and found_prefix:
-            return True, found_prefix
+            arrived = latest_modified.strftime("%H:%M on %d/%m/%Y") if latest_modified else ""
+            return True, found_prefix, arrived
         # Partial match fallback — folder name contains normalised slug
         for page in paginator.paginate(Bucket=WASABI_BUCKET, Prefix=prefix):
             for obj in page.get("Contents", []):
@@ -259,12 +266,16 @@ def check_wasabi_footage(bookmark_slug):
                     elif ext == "json":
                         has_json = True
                         found_prefix = fp
+                    lm = obj.get("LastModified")
+                    if lm and (latest_modified is None or lm > latest_modified):
+                        latest_modified = lm
         if has_video and has_json and found_prefix:
-            return True, found_prefix
-        return False, None
+            arrived = latest_modified.strftime("%H:%M on %d/%m/%Y") if latest_modified else ""
+            return True, found_prefix, arrived
+        return False, None, None
     except Exception as e:
         print(f"Wasabi check error: {e}")
-        return False, None
+        return False, None, None
 
 def upload_to_wasabi(docx_bytes, wasabi_prefix, filename):
     """Upload statement docx to Wasabi alongside its footage.
@@ -278,7 +289,7 @@ def upload_to_wasabi(docx_bytes, wasabi_prefix, filename):
         Body=docx_bytes,
         ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
-    return datetime.now().strftime("%H:%M:%S"), key
+    return datetime.now().strftime("%H:%M on %d/%m/%Y"), key
 
 # ── Claude — Witness Statement ────────────────────────────────────────────────
 
@@ -1461,16 +1472,20 @@ function toggleSidebar(){
         <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
             <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:4px;">&#9729;&#65039; Statement Delivery</div>
             <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
-            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">&#10003; Footage confirmed in Wasabi cloud for this bookmark</div>
+            <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;flex-wrap:wrap;">
+                <span style="font-size:12px;color:#3fb950;">&#10003; Package confirmed</span>
+                {% if wasabi_arrived %}<span style="font-size:12px;color:#8b949e;font-family:'DM Mono',monospace;">{{ wasabi_arrived }}</span>{% endif %}
+            </div>
+            <div style="font-size:12px;color:#484f58;margin-bottom:14px;">Choose how to deliver this statement:</div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> ⬇️ Download only
+                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> &#11015;&#65039; Download only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="cloud" style="width:auto;"> ☁️ Upload to cloud only
+                    <input type="radio" name="delivery" value="cloud" style="width:auto;"> &#9729;&#65039; Save into cloud package only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="both" style="width:auto;"> ⬇️☁️ Download + Upload to cloud
+                    <input type="radio" name="delivery" value="both" style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
                 </label>
             </div>
             <input type="hidden" name="wasabi_prefix" value="{{ wasabi_prefix }}">
@@ -1503,11 +1518,24 @@ function toggleSidebar(){
 
 <div id="successBox" style="display:none;max-width:820px;margin:0 auto;padding:0 20px 80px;">
     <div style="background:#0d2b0d;border:1px solid #238636;border-radius:10px;padding:30px;text-align:center;">
-        <div style="font-size:44px;margin-bottom:12px;">✅</div>
+        <div style="font-size:44px;margin-bottom:12px;">&#10003;</div>
         <div style="font-size:20px;font-weight:700;color:#3fb950;margin-bottom:6px;">Statement Generated</div>
-        <div id="successSubtitle" style="font-size:13px;color:#8b949e;margin-bottom:8px;">Your Word document is downloading now.</div>
-        <div id="cloudStatus" style="font-size:13px;margin-bottom:20px;min-height:18px;"></div>
-        <a href="/" style="background:#21262d;color:#e6edf3;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">← New Statement</a>
+        <div id="successSubtitle" style="font-size:13px;color:#8b949e;margin-bottom:16px;">Your Word document is downloading now.</div>
+        <div id="cloudTimeline" style="display:none;background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:14px 18px;margin-bottom:20px;text-align:left;">
+            <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:10px;font-family:'DM Mono',monospace;">Cloud Package Timeline</div>
+            <div style="display:flex;flex-direction:column;gap:9px;">
+                <div style="display:flex;gap:12px;align-items:baseline;">
+                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:160px;flex-shrink:0;">&#128230; Package confirmed</span>
+                    <span id="tlArrived" style="font-size:13px;color:#8b949e;font-family:'DM Mono',monospace;"></span>
+                </div>
+                <div style="display:flex;gap:12px;align-items:baseline;">
+                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:160px;flex-shrink:0;">&#128196; Statement saved</span>
+                    <span id="tlSaved" style="font-size:13px;color:#3fb950;font-family:'DM Mono',monospace;"></span>
+                </div>
+            </div>
+        </div>
+        <div id="cloudError" style="display:none;font-size:13px;color:#f85149;margin-bottom:20px;"></div>
+        <a href="/" style="background:#21262d;color:#e6edf3;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">&#8592; New Statement</a>
     </div>
     <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
         <div style="font-size:13px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #21262d;">Email Statement</div>
@@ -1533,6 +1561,7 @@ function toggleSidebar(){
 </div>
 
 <script>
+var _wasabiArrived = "{{ wasabi_arrived }}";
 function getUKTime() {
     const now = new Date();
     function lastSunday(year, month) {
@@ -1728,19 +1757,25 @@ if (stmtForm) stmtForm.addEventListener('submit', function(e) {
             document.getElementById('loadingBox').style.display = 'none';
             document.querySelector('.container').style.display  = 'none';
             document.getElementById('successBox').style.display = 'block';
-            // Update subtitle
+            // Subtitle
             var sub = document.getElementById('successSubtitle');
-            if (delivery === 'cloud') sub.textContent = 'Statement uploaded to cloud — no local download.';
-            else if (delivery === 'both') sub.textContent = 'Statement downloading and uploading to cloud.';
+            if (delivery === 'cloud') sub.textContent = 'Statement saved into cloud package — no local download.';
+            else if (delivery === 'both') sub.textContent = 'Statement downloading and saved into cloud package.';
             else sub.textContent = 'Your Word document is downloading now.';
-            // Cloud status
-            var cs = document.getElementById('cloudStatus');
+            // Cloud package timeline
             if (window._wasabiUploaded) {
-                cs.style.color = '#3fb950';
-                cs.textContent = '☁️ Uploaded to Wasabi cloud at ' + window._wasabiTs;
+                var tl = document.getElementById('cloudTimeline');
+                if (tl) {
+                    document.getElementById('tlArrived').textContent = _wasabiArrived || '—';
+                    document.getElementById('tlSaved').textContent   = window._wasabiTs || '—';
+                    tl.style.display = 'block';
+                }
             } else if (window._wasabiErr) {
-                cs.style.color = '#f85149';
-                cs.textContent = '⚠️ Cloud upload failed: ' + window._wasabiErr;
+                var ce = document.getElementById('cloudError');
+                if (ce) {
+                    ce.textContent = '⚠ Statement upload to cloud failed: ' + window._wasabiErr;
+                    ce.style.display = 'block';
+                }
             }
         })
         .catch(function(err) {
@@ -2079,16 +2114,20 @@ function toggleSidebar(){
         <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
             <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:4px;">&#9729;&#65039; Disclosure Record Delivery</div>
             <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
-            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">&#10003; Footage confirmed in Wasabi cloud for this bookmark</div>
+            <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;flex-wrap:wrap;">
+                <span style="font-size:12px;color:#3fb950;">&#10003; Package confirmed</span>
+                {% if wasabi_arrived %}<span style="font-size:12px;color:#8b949e;font-family:'DM Mono',monospace;">{{ wasabi_arrived }}</span>{% endif %}
+            </div>
+            <div style="font-size:12px;color:#484f58;margin-bottom:14px;">Choose how to deliver this disclosure record:</div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> ⬇️ Download only
+                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> &#11015;&#65039; Download only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="cloud" style="width:auto;"> ☁️ Upload to cloud only
+                    <input type="radio" name="delivery" value="cloud" style="width:auto;"> &#9729;&#65039; Save into cloud package only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="both" style="width:auto;"> ⬇️☁️ Download + Upload to cloud
+                    <input type="radio" name="delivery" value="both" style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
                 </label>
             </div>
             <input type="hidden" name="wasabi_prefix" value="{{ wasabi_prefix }}">
@@ -2121,11 +2160,24 @@ function toggleSidebar(){
 
 <div id="successBox" style="display:none;max-width:820px;margin:0 auto;padding:0 20px 80px;">
     <div style="background:#120a1f;border:1px solid #8a5cf6;border-radius:10px;padding:30px;text-align:center;">
-        <div style="font-size:44px;margin-bottom:12px;">✅</div>
+        <div style="font-size:44px;margin-bottom:12px;">&#10003;</div>
         <div style="font-size:20px;font-weight:700;color:#8a5cf6;margin-bottom:6px;">Disclosure Record Generated</div>
-        <div id="foiSuccessSubtitle" style="font-size:13px;color:#8b949e;margin-bottom:8px;">Your document is downloading now.</div>
-        <div id="foiCloudStatus" style="font-size:13px;margin-bottom:20px;min-height:18px;"></div>
-        <a href="/" style="background:#21262d;color:#e6edf3;padding:14px 22px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">← Back to Bookmarks</a>
+        <div id="foiSuccessSubtitle" style="font-size:13px;color:#8b949e;margin-bottom:16px;">Your document is downloading now.</div>
+        <div id="foiCloudTimeline" style="display:none;background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:14px 18px;margin-bottom:20px;text-align:left;">
+            <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:10px;font-family:'DM Mono',monospace;">Cloud Package Timeline</div>
+            <div style="display:flex;flex-direction:column;gap:9px;">
+                <div style="display:flex;gap:12px;align-items:baseline;">
+                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:160px;flex-shrink:0;">&#128230; Package confirmed</span>
+                    <span id="foiTlArrived" style="font-size:13px;color:#8b949e;font-family:'DM Mono',monospace;"></span>
+                </div>
+                <div style="display:flex;gap:12px;align-items:baseline;">
+                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:160px;flex-shrink:0;">&#128196; Record saved</span>
+                    <span id="foiTlSaved" style="font-size:13px;color:#8a5cf6;font-family:'DM Mono',monospace;"></span>
+                </div>
+            </div>
+        </div>
+        <div id="foiCloudError" style="display:none;font-size:13px;color:#f85149;margin-bottom:20px;"></div>
+        <a href="/" style="background:#21262d;color:#e6edf3;padding:14px 22px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">&#8592; Back to Bookmarks</a>
     </div>
     <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
         <div style="font-size:13px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #21262d;">Email Disclosure Record</div>
@@ -2150,6 +2202,7 @@ function toggleSidebar(){
     </div>
 </div>
 <script>
+var _wasabiArrived = "{{ wasabi_arrived }}";
 // ── FOI clock ─────────────────────────────────────────────────────────────────
 function foiGetUKTime() {
     var now = new Date();
@@ -2295,18 +2348,23 @@ if (foiForm) foiForm.addEventListener('submit', function(e) {
             document.getElementById('successBox').style.display = 'block';
             var sub = document.getElementById('foiSuccessSubtitle');
             if (sub) {
-                if (delivery === 'cloud') sub.textContent = 'Disclosure record uploaded to cloud — no local download.';
-                else if (delivery === 'both') sub.textContent = 'Disclosure record downloading and uploading to cloud.';
+                if (delivery === 'cloud') sub.textContent = 'Record saved into cloud package — no local download.';
+                else if (delivery === 'both') sub.textContent = 'Record downloading and saved into cloud package.';
                 else sub.textContent = 'Your document is downloading now.';
             }
-            var cs = document.getElementById('foiCloudStatus');
-            if (cs) {
-                if (window._foiWasabiUploaded) {
-                    cs.style.color = '#8a5cf6';
-                    cs.textContent = '☁️ Uploaded to Wasabi cloud at ' + window._foiWasabiTs;
-                } else if (window._foiWasabiErr) {
-                    cs.style.color = '#f85149';
-                    cs.textContent = '⚠️ Cloud upload failed: ' + window._foiWasabiErr;
+            // Cloud package timeline
+            if (window._foiWasabiUploaded) {
+                var tl = document.getElementById('foiCloudTimeline');
+                if (tl) {
+                    document.getElementById('foiTlArrived').textContent = _wasabiArrived || '—';
+                    document.getElementById('foiTlSaved').textContent   = window._foiWasabiTs || '—';
+                    tl.style.display = 'block';
+                }
+            } else if (window._foiWasabiErr) {
+                var ce = document.getElementById('foiCloudError');
+                if (ce) {
+                    ce.textContent = '⚠ Record upload to cloud failed: ' + window._foiWasabiErr;
+                    ce.style.display = 'block';
                 }
             }
         })
@@ -2400,12 +2458,15 @@ def _statement_handler(bookmark_id, pipeline):
     if not bm: return redirect(url_for("index"))
 
     # ── Check Wasabi for matching footage on every GET ────────────────────────
-    wasabi_found  = False
-    wasabi_prefix = ""
-    wasabi_error  = ""
+    wasabi_found   = False
+    wasabi_prefix  = ""
+    wasabi_arrived = ""   # HH:MM on DD/MM/YYYY — when cloud package became available
+    wasabi_error   = ""
     try:
-        wasabi_found, wasabi_prefix = check_wasabi_footage(bm.get("name", ""))
-        if not wasabi_found and wasabi_prefix is None:
+        wasabi_found, wasabi_prefix, wasabi_arrived = check_wasabi_footage(bm.get("name", ""))
+        wasabi_prefix  = wasabi_prefix  or ""
+        wasabi_arrived = wasabi_arrived or ""
+        if not wasabi_found:
             wasabi_error = "deferred"   # footage not yet uploaded
     except Exception as we:
         wasabi_error = str(we)
@@ -2468,7 +2529,8 @@ def _statement_handler(bookmark_id, pipeline):
     initials = session.get("initials", "XX")
     return render_template_string(FORM_HTML, bm=bm, session=session, today=today,
                                   locations=LOCATIONS, initials=initials, pipeline=pipeline,
-                                  wasabi_found=wasabi_found, wasabi_prefix=wasabi_prefix)
+                                  wasabi_found=wasabi_found, wasabi_prefix=wasabi_prefix,
+                                  wasabi_arrived=wasabi_arrived)
 
 @app.route("/foi/<int:bookmark_id>", methods=["GET","POST"])
 @login_required
@@ -2477,10 +2539,13 @@ def foi(bookmark_id):
     if not bm: return redirect(url_for("index"))
 
     # ── Check Wasabi on GET ───────────────────────────────────────────────────
-    wasabi_found  = False
-    wasabi_prefix = ""
+    wasabi_found   = False
+    wasabi_prefix  = ""
+    wasabi_arrived = ""
     try:
-        wasabi_found, wasabi_prefix = check_wasabi_footage(bm.get("name", ""))
+        wasabi_found, wasabi_prefix, wasabi_arrived = check_wasabi_footage(bm.get("name", ""))
+        wasabi_prefix  = wasabi_prefix  or ""
+        wasabi_arrived = wasabi_arrived or ""
     except Exception as we:
         print(f"Wasabi check error (FOI): {we}")
     # ─────────────────────────────────────────────────────────────────────────
@@ -2537,7 +2602,8 @@ def foi(bookmark_id):
     initials = session.get("initials", "XX")
     return render_template_string(FOI_FORM_HTML, bm=bm, session=session,
                                   today=today, initials=initials, site_ref=SITE_REF,
-                                  wasabi_found=wasabi_found, wasabi_prefix=wasabi_prefix)
+                                  wasabi_found=wasabi_found, wasabi_prefix=wasabi_prefix,
+                                  wasabi_arrived=wasabi_arrived)
 
 @app.route("/send-email", methods=["POST"])
 @login_required
