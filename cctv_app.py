@@ -2401,8 +2401,9 @@ def _statement_handler(bookmark_id, pipeline):
             date_str  = download_time.strftime("%Y-%m-%d_%H-%M")
             safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in witness_name)
             safe_bm   = "".join(c if c.isalnum() or c in "-_" else "_" for c in bookmark_name)
-            pipeline_tag = "SYP" if pipeline == "syp" else "RMBC"
-            filename  = f"{date_str}_{pipeline_tag}_{safe_name}_{safe_bm}.docx"
+            pipeline_tag  = "SYP" if pipeline == "syp" else "RMBC"
+            filename       = f"{date_str}_{pipeline_tag}_{safe_name}_{safe_bm}.docx"
+            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M-%S')}.docx"
             # Save to temp for email feature
             doc_token = str(uuid.uuid4())
             tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
@@ -2415,7 +2416,7 @@ def _statement_handler(bookmark_id, pipeline):
             if delivery in ("cloud", "both") and wp:
                 try:
                     docx_buf.seek(0)
-                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, filename)
+                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, cloud_filename)
                 except Exception as ue:
                     wasabi_err = str(ue)
                     print(f"Wasabi upload error: {ue}")
@@ -2472,7 +2473,8 @@ def foi(bookmark_id):
             witness_name = form_data.get("witness_name", "Officer")
             date_str  = download_time.strftime("%Y-%m-%d_%H-%M")
             safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in witness_name)
-            filename  = f"{date_str}_{safe_name}_FOI_Disclosure.docx"
+            filename       = f"{date_str}_{safe_name}_FOI_Disclosure.docx"
+            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M-%S')}.docx"
             doc_token = str(uuid.uuid4())
             tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
             with open(tmp_path, "wb") as f:
@@ -2484,7 +2486,7 @@ def foi(bookmark_id):
             if delivery in ("cloud", "both") and wp:
                 try:
                     docx_buf.seek(0)
-                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, filename)
+                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, cloud_filename)
                 except Exception as ue:
                     wasabi_err = str(ue)
                     print(f"Wasabi upload error (FOI): {ue}")
