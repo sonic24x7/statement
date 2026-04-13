@@ -403,3 +403,46 @@ On a development or test server this file will not exist — the bookmark list w
 ## What's Next — Docker Streamlined Install
 
 Once the script is finalised, the install process will be streamlined using Docker so that deploying to any server takes just a couple of commands — no manual dependency management required.
+
+---
+
+## Uninstall Guide
+
+### Remove the CCTV Statement app
+
+```bash
+sudo systemctl stop cctv-statement
+sudo systemctl disable cctv-statement
+sudo rm /etc/systemd/system/cctv-statement.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/CCTV_Statement
+```
+
+### Remove Ollama and all downloaded models
+
+```bash
+sudo systemctl stop ollama
+sudo systemctl disable ollama
+sudo rm /etc/systemd/system/ollama.service
+sudo systemctl daemon-reload
+sudo rm -rf /usr/local/bin/ollama
+sudo rm -rf /root/.ollama
+```
+
+> **This deletes all downloaded models** including llama3.1 (~4.7GB). If you want to keep Ollama but just remove a specific model:
+> ```
+> ollama rm llama3.1
+> ```
+
+### Remove Python virtual environment only
+
+```bash
+sudo rm -rf /opt/CCTV_Statement/venv
+```
+
+### Firewall — close port 5000
+
+```bash
+ufw delete allow 5000/tcp
+ufw reload
+```
