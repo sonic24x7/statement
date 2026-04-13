@@ -144,8 +144,11 @@ def get_bookmarks():
             s = datetime.fromtimestamp(r["start_time"] / 1000, tz=timezone.utc)
             e = datetime.fromtimestamp((r["start_time"] + r["duration"]) / 1000, tz=timezone.utc)
             d = r["duration"] / 1000
-            r["start_fmt"]    = s.strftime("%d/%m/%Y %H:%M:%S")
-            r["end_fmt"]      = e.strftime("%d/%m/%Y %H:%M:%S")
+            # Seconds omitted intentionally — keyframe misalignment means exact
+            # seconds from bookmark metadata are unreliable. HH:MM is sufficient
+            # for all legal purposes and avoids misleading precision in court.
+            r["start_fmt"]    = s.strftime("%d/%m/%Y %H:%M")
+            r["end_fmt"]      = e.strftime("%d/%m/%Y %H:%M")
             r["duration_fmt"] = f"{int(d//60)}m {int(d%60)}s"
         return rows
     except Exception as e:
@@ -162,8 +165,11 @@ def get_bookmark(record_id):
         e = datetime.fromtimestamp((r["start_time"] + r["duration"]) / 1000, tz=timezone.utc)
         d = r["duration"] / 1000
         r["start_dt"] = s; r["end_dt"] = e
-        r["start_fmt"]    = s.strftime("%d/%m/%Y %H:%M:%S")
-        r["end_fmt"]      = e.strftime("%d/%m/%Y %H:%M:%S")
+        # Seconds omitted intentionally — keyframe misalignment means exact
+        # seconds from bookmark metadata are unreliable. HH:MM is sufficient
+        # for all legal purposes and avoids misleading precision in court.
+        r["start_fmt"]    = s.strftime("%d/%m/%Y %H:%M")
+        r["end_fmt"]      = e.strftime("%d/%m/%Y %H:%M")
         hours = int(d // 3600)
         mins  = int((d % 3600) // 60)
         secs  = int(d % 60)
@@ -171,8 +177,8 @@ def get_bookmark(record_id):
             r["duration_fmt"] = f"{hours} hours, {mins} minutes and {secs} seconds"
         else:
             r["duration_fmt"] = f"{mins} minutes and {secs} seconds"
-        r["created_fmt"]  = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%H:%M:%S on %d/%m/%Y") if r.get("created") else "Unknown"
-        r["created_time"] = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%H:%M:%S") if r.get("created") else ""
+        r["created_fmt"]  = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%H:%M on %d/%m/%Y") if r.get("created") else "Unknown"
+        r["created_time"] = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%H:%M") if r.get("created") else ""
         r["created_date"] = datetime.fromtimestamp(r["created"]/1000, tz=timezone.utc).strftime("%d/%m/%Y") if r.get("created") else ""
         return r
     except Exception as e:
@@ -2403,7 +2409,7 @@ def _statement_handler(bookmark_id, pipeline):
             safe_bm   = "".join(c if c.isalnum() or c in "-_" else "_" for c in bookmark_name)
             pipeline_tag  = "SYP" if pipeline == "syp" else "RMBC"
             filename       = f"{date_str}_{pipeline_tag}_{safe_name}_{safe_bm}.docx"
-            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M-%S')}.docx"
+            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M')}.docx"
             # Save to temp for email feature
             doc_token = str(uuid.uuid4())
             tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
@@ -2474,7 +2480,7 @@ def foi(bookmark_id):
             date_str  = download_time.strftime("%Y-%m-%d_%H-%M")
             safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in witness_name)
             filename       = f"{date_str}_{safe_name}_FOI_Disclosure.docx"
-            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M-%S')}.docx"
+            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M')}.docx"
             doc_token = str(uuid.uuid4())
             tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
             with open(tmp_path, "wb") as f:
