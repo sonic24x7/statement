@@ -1,6 +1,11 @@
 """
-cctv_app.py  (v6.2 — local Ollama AI backend added)
+cctv_app.py  (v6.3 — tighter prompt and temperature:0 for Ollama)
 ================================================
+Changes from v6.2:
+- Prompt rewritten as strict transcription tool instructions — no creativity, no rephrasing
+- temperature:0 added to Ollama payload — deterministic output, stops model improvising
+- System prompt tightened to match
+
 Changes from v6.1:
 - AI_BACKEND config: set to "anthropic" (default) or "ollama" in .env
 - Ollama support: calls local Ollama API (http://localhost:11434) when AI_BACKEND=ollama
@@ -276,24 +281,23 @@ def generate_statement(bm, form, download_time):
             f"- Location of handover: ______________________"
         )
 
-    prompt = f"""You are producing a short, factual MG11 technical CCTV witness statement for a CCTV engineer at Rotherham Metropolitan Borough Council.
+    prompt = f"""You are a transcription tool. Your only job is to assemble the sections below into a flowing MG11 witness statement. You do NOT rewrite, rephrase, improve, or add to any of the provided text.
 
-STRICT RULES:
-- Plain, professional English — NOT overly formal or legalistic
-- Maximum 7 short paragraphs, NO headings or titles between paragraphs
+ABSOLUTE RULES — NO EXCEPTIONS:
+- Copy the VERBATIM sections below WORD FOR WORD, CHARACTER FOR CHARACTER — do not change a single word
+- Only Para 1 (introduction) is written by you — keep it to 2 sentences maximum
+- Maximum 7 paragraphs total, no headings, no bold, no bullet points except where they appear in the verbatim text
 - First person, past tense
-- The engineer does NOT describe what happened in the footage — technical witness only
-- Use the EXACT wording provided below for system description, bookmark creation, clock check, export, storage and handover — do not rephrase or summarise
-- Do NOT add bold text, section labels, or any headings — plain flowing paragraphs only
-- End with the Section 9 CJA 1967 declaration
+- End with the exact Section 9 CJA 1967 declaration text: "This statement is true to the best of my knowledge and belief and I make it knowing that, if it is tendered in evidence, I shall be liable to prosecution if I have wilfully stated in it anything which I know to be false or do not believe to be true."
+- Output plain text only — no markdown, no formatting
 
 STRUCTURE:
-Para 1 — Who I am, my role, where I am currently based, purpose of this statement{f' in relation to: {ref_line}' if ref_line else ''}
-Para 2 — The CCTV system and camera (USE VERBATIM TEXT BELOW)
-Para 3 — How the footage was identified; who created the bookmark (USE VERBATIM BOOKMARK TEXT BELOW)
-Para 4 — Clock check (USE VERBATIM TEXT BELOW)
-Para 5 — Export and handover (USE VERBATIM EXPORT & HANDOVER TEXT BELOW — reproduce exactly including all bullet lines)
-Para 6 — Section 9 CJA 1967 declaration
+Para 1 — Who I am, my role, where I am currently based, purpose of this statement{f' in relation to: {ref_line}' if ref_line else ''} (2 sentences max — write this yourself)
+Para 2 — COPY THE SYSTEM DESCRIPTION VERBATIM BELOW — every word exactly as written
+Para 3 — COPY THE BOOKMARK CREATION TEXT VERBATIM BELOW — every word exactly as written
+Para 4 — COPY THE CLOCK CHECK TEXT VERBATIM BELOW — every word exactly as written
+Para 5 — COPY THE EXPORT & HANDOVER TEXT VERBATIM BELOW — every word and every bullet line exactly as written
+Para 6 — Section 9 CJA 1967 declaration (exact wording above)
 
 === WITNESS ===
 Name: {form.get('witness_name')}
@@ -310,25 +314,25 @@ Duration: {bm.get('duration_fmt')}
 Bookmark name: {bm.get('name')}
 Bookmark created: {bm.get('created_fmt')}
 
-=== SYSTEM DESCRIPTION — VERBATIM ===
+=== SYSTEM DESCRIPTION — COPY THIS VERBATIM, DO NOT CHANGE ANY WORD ===
 The CCTV system at this location is referenced as {SITE_REF}. The system is owned and operated by Rotherham Metropolitan Borough Council and comprises networked Hikvision cameras integrated with the Nx Witness video management system developed by Network Optix. At the time of review, the system was operating on software version 6.1.0.42176.
 The footage referred to in this statement was captured by a camera installed on {form.get('camera_location', 'Lamp Post')} at {form.get('incident_location', 'the above location')}.
 
-=== BOOKMARK CREATION — VERBATIM ===
+=== BOOKMARK CREATION — COPY THIS VERBATIM, DO NOT CHANGE ANY WORD ===
 {creator_phrase} created a bookmark within the system named "{bm.get('name')}" at {bm.get('created_time')} on {bm.get('created_date')} to preserve the relevant footage for export.
 
-=== CLOCK CHECK — VERBATIM ===
+=== CLOCK CHECK — COPY THIS VERBATIM, DO NOT CHANGE ANY WORD ===
 {clock_para}
 
-=== EXPORT & HANDOVER — VERBATIM, REPRODUCE EXACTLY ===
+=== EXPORT & HANDOVER — COPY THIS VERBATIM INCLUDING ALL BULLET LINES, DO NOT CHANGE ANY WORD ===
 {export_para}
 
 {handover}"""
 
     system_prompt = (
-        "You produce short factual UK MG11 technical CCTV witness statements. "
-        "Plain professional English. Maximum 7 paragraphs. No footage description. "
-        "Reproduce verbatim sections exactly as provided."
+        "You are a precise transcription tool. You copy verbatim sections exactly as given — "
+        "not one word changed. You only write the brief introduction paragraph yourself. "
+        "No creativity. No improvements. No rephrasing. Plain text output only."
     )
 
     if AI_BACKEND == "ollama":
@@ -339,6 +343,7 @@ The footage referred to in this statement was captured by a camera installed on 
                 {"role": "user",   "content": prompt},
             ],
             "stream": False,
+            "options": {"temperature": 0},
         }
         r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, timeout=120)
         r.raise_for_status()
