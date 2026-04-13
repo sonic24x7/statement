@@ -1,6 +1,15 @@
 """
-cctv_app.py  (v6.4 — Anthropic removed, Ollama only)
+cctv_app.py  (v6.5 — Wasabi cloud upload for all 3 pipelines)
 ================================================
+Changes from v6.4:
+- Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
+- On form load: checks Wasabi for matching footage (video + JSON) for bookmark
+- If footage found: officer chooses Download / Cloud / Both
+- If not found: download only with deferred [D] upload warning
+- Cloud upload timestamps recorded; upload failures shown but never block download
+- WASABI_ACCESS_KEY, WASABI_SECRET_KEY, WASABI_BUCKET, WASABI_REGION in .env
+- # TODO: cross-pipeline handover logic review (deferred — flagged in code)
+
 Changes from v6.3:
 - Anthropic API dependency removed entirely — Ollama only
 - ANTHROPIC_API_KEY, CLAUDE_API_URL, CLAUDE_MODEL, AI_BACKEND constants removed
@@ -46,6 +55,10 @@ Install:
     OLLAMA_HOST=http://localhost:11434  # optional, defaults to localhost
     GMAIL_USER=rmbcvms@gmail.com
     GMAIL_APP_PASSWORD=your-16-char-app-password
+    WASABI_ACCESS_KEY=your-access-key
+    WASABI_SECRET_KEY=your-secret-key
+    WASABI_BUCKET=cctvserver
+    WASABI_REGION=eu-west-1
 
 Run:
     /opt/CCTV_Statement/venv/bin/python3 cctv_app.py
@@ -74,6 +87,10 @@ GMAIL_USER         = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 OLLAMA_HOST        = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL", "llama3.1")
+WASABI_ACCESS_KEY  = os.environ.get("WASABI_ACCESS_KEY", "")
+WASABI_SECRET_KEY  = os.environ.get("WASABI_SECRET_KEY", "")
+WASABI_BUCKET      = os.environ.get("WASABI_BUCKET", "cctvserver")
+WASABI_REGION      = os.environ.get("WASABI_REGION", "eu-west-1")
 
 # Temp file store: token → (filepath, filename)
 _TEMP_DOCS: dict = {}
@@ -160,6 +177,69 @@ def get_bookmark(record_id):
         return r
     except Exception as e:
         print(f"SQLite error: {e}"); return None
+
+# ── Wasabi cloud storage ──────────────────────────────────────────────────────
+
+def _wasabi_client():
+    import boto3
+    from botocore.client import Config
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://s3.{WASABI_REGION}.wasabisys.com",
+        aws_access_key_id=WASABI_ACCESS_KEY,
+        aws_secret_access_key=WASABI_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+    )
+
+def check_wasabi_footage(bookmark_slug):
+    """Search Wasabi for a folder matching bookmark_slug containing video + JSON.
+    Returns (True, prefix_str) or (False, None).
+    Prefix format: RMBC060/automated/DD-MM-YYYY/bookmark-slug/
+    # TODO: cross-pipeline review — currently always checks RMBC060/automated/
+    # for all pipelines. FOI and SYP may need separate bucket paths in future.
+    """
+    if not WASABI_ACCESS_KEY or not WASABI_SECRET_KEY:
+        return False, None
+    try:
+        s3 = _wasabi_client()
+        prefix = "RMBC060/automated/"
+        paginator = s3.get_paginator("list_objects_v2")
+        has_video = False
+        has_json  = False
+        found_prefix = None
+        needle = f"/{bookmark_slug}/"
+        for page in paginator.paginate(Bucket=WASABI_BUCKET, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if needle in key:
+                    if found_prefix is None:
+                        idx = key.index(needle)
+                        found_prefix = key[: idx + len(needle)]
+                    ext = key.rsplit(".", 1)[-1].lower()
+                    if ext in ("mkv", "mp4"):
+                        has_video = True
+                    elif ext == "json":
+                        has_json = True
+        if has_video and has_json and found_prefix:
+            return True, found_prefix
+        return False, None
+    except Exception as e:
+        print(f"Wasabi check error: {e}")
+        return False, None
+
+def upload_to_wasabi(docx_bytes, wasabi_prefix, filename):
+    """Upload statement docx to Wasabi alongside its footage.
+    Returns (timestamp_str, wasabi_key).
+    """
+    s3  = _wasabi_client()
+    key = f"{wasabi_prefix}{filename}"
+    s3.put_object(
+        Bucket=WASABI_BUCKET,
+        Key=key,
+        Body=docx_bytes,
+        ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    return datetime.now().strftime("%H:%M:%S"), key
 
 # ── Claude — Witness Statement ────────────────────────────────────────────────
 
@@ -1334,12 +1414,39 @@ function toggleSidebar(){
             </label>
         </div>
 
+        <!-- ── Cloud delivery options ──────────────────────────────────── -->
+        {% if wasabi_found %}
+        <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
+            <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:10px;">☁️ Statement Delivery</div>
+            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">✅ Footage confirmed in Wasabi cloud for this bookmark</div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
+                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> ⬇️ Download only
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
+                    <input type="radio" name="delivery" value="cloud" style="width:auto;"> ☁️ Upload to cloud only
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
+                    <input type="radio" name="delivery" value="both" style="width:auto;"> ⬇️☁️ Download + Upload to cloud
+                </label>
+            </div>
+            <input type="hidden" name="wasabi_prefix" value="{{ wasabi_prefix }}">
+        </div>
+        {% else %}
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
+            <div style="font-size:12px;color:#8b949e;">☁️ No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>. If deferred [D] upload was selected, check again after 06:00.</div>
+            <input type="hidden" name="delivery" value="download">
+            <input type="hidden" name="wasabi_prefix" value="">
+        </div>
+        {% endif %}
+        <!-- ───────────────────────────────────────────────────────────────── -->
+
         <button type="submit" class="submit-btn" id="submitBtn" disabled style="opacity:0.5;cursor:not-allowed;">⚡ Generate Witness Statement</button>
 
         <div id="loadingBox">
             <div style="font-size:36px;margin-bottom:12px;">⏳</div>
             <div style="font-size:16px;font-weight:700;color:#e6edf3;margin-bottom:8px;">Generating Statement...</div>
-            <div style="font-size:13px;color:#8b949e;">Please wait — approximately 30 seconds.</div>
+            <div style="font-size:13px;color:#8b949e;">Please wait — this may take up to 60 seconds.</div>
         </div>
 
     </form>
@@ -1349,7 +1456,8 @@ function toggleSidebar(){
     <div style="background:#0d2b0d;border:1px solid #238636;border-radius:10px;padding:30px;text-align:center;">
         <div style="font-size:44px;margin-bottom:12px;">✅</div>
         <div style="font-size:20px;font-weight:700;color:#3fb950;margin-bottom:6px;">Statement Generated</div>
-        <div style="font-size:13px;color:#8b949e;margin-bottom:24px;">Your Word document is downloading now.</div>
+        <div id="successSubtitle" style="font-size:13px;color:#8b949e;margin-bottom:8px;">Your Word document is downloading now.</div>
+        <div id="cloudStatus" style="font-size:13px;margin-bottom:20px;min-height:18px;"></div>
         <a href="/" style="background:#21262d;color:#e6edf3;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">← New Statement</a>
     </div>
     <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
@@ -1553,17 +1661,38 @@ if (stmtForm) stmtForm.addEventListener('submit', function(e) {
         .then(function(r) {
             if (!r.ok) throw new Error('Server error ' + r.status);
             _docToken = r.headers.get('X-Doc-Token');
+            window._delivery       = r.headers.get('X-Delivery') || 'download';
+            window._wasabiUploaded = r.headers.get('X-Wasabi-Uploaded') === 'true';
+            window._wasabiTs       = r.headers.get('X-Wasabi-Timestamp') || '';
+            window._wasabiErr      = r.headers.get('X-Wasabi-Error') || '';
             return r.blob();
         })
         .then(function(blob) {
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a'); a.href = url;
-            a.download = 'witness_statement.docx';
-            document.body.appendChild(a); a.click();
-            document.body.removeChild(a); URL.revokeObjectURL(url);
+            var delivery = window._delivery || 'download';
+            if (delivery === 'download' || delivery === 'both') {
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a'); a.href = url;
+                a.download = 'witness_statement.docx';
+                document.body.appendChild(a); a.click();
+                document.body.removeChild(a); URL.revokeObjectURL(url);
+            }
             document.getElementById('loadingBox').style.display = 'none';
             document.querySelector('.container').style.display  = 'none';
             document.getElementById('successBox').style.display = 'block';
+            // Update subtitle
+            var sub = document.getElementById('successSubtitle');
+            if (delivery === 'cloud') sub.textContent = 'Statement uploaded to cloud — no local download.';
+            else if (delivery === 'both') sub.textContent = 'Statement downloading and uploading to cloud.';
+            else sub.textContent = 'Your Word document is downloading now.';
+            // Cloud status
+            var cs = document.getElementById('cloudStatus');
+            if (window._wasabiUploaded) {
+                cs.style.color = '#3fb950';
+                cs.textContent = '☁️ Uploaded to Wasabi cloud at ' + window._wasabiTs;
+            } else if (window._wasabiErr) {
+                cs.style.color = '#f85149';
+                cs.textContent = '⚠️ Cloud upload failed: ' + window._wasabiErr;
+            }
         })
         .catch(function(err) {
             document.getElementById('loadingBox').innerHTML =
@@ -1896,6 +2025,33 @@ function toggleSidebar(){
             </div>
         </div>
 
+        <!-- ── Cloud delivery options (FOI) ───────────────────────────────── -->
+        {% if wasabi_found %}
+        <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
+            <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:10px;">☁️ Disclosure Record Delivery</div>
+            <div style="font-size:12px;color:#3fb950;margin-bottom:14px;">✅ Footage confirmed in Wasabi cloud for this bookmark</div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
+                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> ⬇️ Download only
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
+                    <input type="radio" name="delivery" value="cloud" style="width:auto;"> ☁️ Upload to cloud only
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
+                    <input type="radio" name="delivery" value="both" style="width:auto;"> ⬇️☁️ Download + Upload to cloud
+                </label>
+            </div>
+            <input type="hidden" name="wasabi_prefix" value="{{ wasabi_prefix }}">
+        </div>
+        {% else %}
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
+            <div style="font-size:12px;color:#8b949e;">☁️ No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>. If deferred [D] upload was selected, check again after 06:00.</div>
+            <input type="hidden" name="delivery" value="download">
+            <input type="hidden" name="wasabi_prefix" value="">
+        </div>
+        {% endif %}
+        <!-- ───────────────────────────────────────────────────────────────── -->
+
         <button type="submit" class="submit-btn" id="foiSubmitBtn">📋 Generate Disclosure Record</button>
 
         <div id="loadingBox">
@@ -1911,7 +2067,8 @@ function toggleSidebar(){
     <div style="background:#120a1f;border:1px solid #8a5cf6;border-radius:10px;padding:30px;text-align:center;">
         <div style="font-size:44px;margin-bottom:12px;">✅</div>
         <div style="font-size:20px;font-weight:700;color:#8a5cf6;margin-bottom:6px;">Disclosure Record Generated</div>
-        <div style="font-size:13px;color:#8b949e;margin-bottom:24px;">Your document is downloading now.</div>
+        <div id="foiSuccessSubtitle" style="font-size:13px;color:#8b949e;margin-bottom:8px;">Your document is downloading now.</div>
+        <div id="foiCloudStatus" style="font-size:13px;margin-bottom:20px;min-height:18px;"></div>
         <a href="/" style="background:#21262d;color:#e6edf3;padding:14px 22px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">← Back to Bookmarks</a>
     </div>
     <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
@@ -2062,17 +2219,40 @@ if (foiForm) foiForm.addEventListener('submit', function(e) {
         .then(function(r) {
             if (!r.ok) throw new Error('Server error ' + r.status);
             _foiDocToken = r.headers.get('X-Doc-Token');
+            window._foiDelivery      = r.headers.get('X-Delivery') || 'download';
+            window._foiWasabiUploaded = r.headers.get('X-Wasabi-Uploaded') === 'true';
+            window._foiWasabiTs      = r.headers.get('X-Wasabi-Timestamp') || '';
+            window._foiWasabiErr     = r.headers.get('X-Wasabi-Error') || '';
             return r.blob();
         })
         .then(function(blob) {
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a'); a.href = url;
-            a.download = 'foi_disclosure_record.docx';
-            document.body.appendChild(a); a.click();
-            document.body.removeChild(a); URL.revokeObjectURL(url);
+            var delivery = window._foiDelivery || 'download';
+            if (delivery === 'download' || delivery === 'both') {
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a'); a.href = url;
+                a.download = 'foi_disclosure_record.docx';
+                document.body.appendChild(a); a.click();
+                document.body.removeChild(a); URL.revokeObjectURL(url);
+            }
             document.getElementById('loadingBox').style.display = 'none';
             document.querySelector('.container').style.display  = 'none';
             document.getElementById('successBox').style.display = 'block';
+            var sub = document.getElementById('foiSuccessSubtitle');
+            if (sub) {
+                if (delivery === 'cloud') sub.textContent = 'Disclosure record uploaded to cloud — no local download.';
+                else if (delivery === 'both') sub.textContent = 'Disclosure record downloading and uploading to cloud.';
+                else sub.textContent = 'Your document is downloading now.';
+            }
+            var cs = document.getElementById('foiCloudStatus');
+            if (cs) {
+                if (window._foiWasabiUploaded) {
+                    cs.style.color = '#8a5cf6';
+                    cs.textContent = '☁️ Uploaded to Wasabi cloud at ' + window._foiWasabiTs;
+                } else if (window._foiWasabiErr) {
+                    cs.style.color = '#f85149';
+                    cs.textContent = '⚠️ Cloud upload failed: ' + window._foiWasabiErr;
+                }
+            }
         })
         .catch(function(err) {
             document.getElementById('loadingBox').innerHTML =
@@ -2162,8 +2342,23 @@ def rmbc(bookmark_id):
 def _statement_handler(bookmark_id, pipeline):
     bm = get_bookmark(bookmark_id)
     if not bm: return redirect(url_for("index"))
+
+    # ── Check Wasabi for matching footage on every GET ────────────────────────
+    wasabi_found  = False
+    wasabi_prefix = ""
+    wasabi_error  = ""
+    try:
+        wasabi_found, wasabi_prefix = check_wasabi_footage(bm.get("name", ""))
+        if not wasabi_found and wasabi_prefix is None:
+            wasabi_error = "deferred"   # footage not yet uploaded
+    except Exception as we:
+        wasabi_error = str(we)
+    # ─────────────────────────────────────────────────────────────────────────
+
     if request.method == "POST":
         form_data     = request.form.to_dict()
+        delivery      = form_data.get("delivery", "download")  # download | cloud | both
+        wp            = form_data.get("wasabi_prefix", "")
         download_time = datetime.now(timezone.utc)
         try:
             statement_text = generate_statement(bm, form_data, download_time)
@@ -2181,11 +2376,28 @@ def _statement_handler(bookmark_id, pipeline):
             with open(tmp_path, "wb") as f:
                 f.write(docx_buf.getvalue())
             _TEMP_DOCS[doc_token] = (tmp_path, filename)
+            # ── Wasabi upload if delivery includes cloud ──────────────────────
+            wasabi_ts  = ""
+            wasabi_err = ""
+            if delivery in ("cloud", "both") and wp:
+                try:
+                    docx_buf.seek(0)
+                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, filename)
+                except Exception as ue:
+                    wasabi_err = str(ue)
+                    print(f"Wasabi upload error: {ue}")
+            # ─────────────────────────────────────────────────────────────────
             docx_buf.seek(0)
             resp = send_file(docx_buf, as_attachment=True, download_name=filename,
                 mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            resp.headers["X-Doc-Token"] = doc_token
-            resp.headers["Access-Control-Expose-Headers"] = "X-Doc-Token"
+            resp.headers["X-Doc-Token"]    = doc_token
+            resp.headers["X-Delivery"]     = delivery
+            resp.headers["X-Wasabi-Uploaded"]  = "true" if wasabi_ts else "false"
+            resp.headers["X-Wasabi-Timestamp"] = wasabi_ts
+            resp.headers["X-Wasabi-Error"]     = wasabi_err
+            resp.headers["Access-Control-Expose-Headers"] = (
+                "X-Doc-Token, X-Delivery, X-Wasabi-Uploaded, X-Wasabi-Timestamp, X-Wasabi-Error"
+            )
             return resp
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -2198,15 +2410,28 @@ def _statement_handler(bookmark_id, pipeline):
     today    = datetime.now().strftime("%d/%m/%Y")
     initials = session.get("initials", "XX")
     return render_template_string(FORM_HTML, bm=bm, session=session, today=today,
-                                  locations=LOCATIONS, initials=initials, pipeline=pipeline)
+                                  locations=LOCATIONS, initials=initials, pipeline=pipeline,
+                                  wasabi_found=wasabi_found, wasabi_prefix=wasabi_prefix)
 
 @app.route("/foi/<int:bookmark_id>", methods=["GET","POST"])
 @login_required
 def foi(bookmark_id):
     bm = get_bookmark(bookmark_id)
     if not bm: return redirect(url_for("index"))
+
+    # ── Check Wasabi on GET ───────────────────────────────────────────────────
+    wasabi_found  = False
+    wasabi_prefix = ""
+    try:
+        wasabi_found, wasabi_prefix = check_wasabi_footage(bm.get("name", ""))
+    except Exception as we:
+        print(f"Wasabi check error (FOI): {we}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     if request.method == "POST":
         form_data     = request.form.to_dict()
+        delivery      = form_data.get("delivery", "download")
+        wp            = form_data.get("wasabi_prefix", "")
         download_time = datetime.now(timezone.utc)
         try:
             foi_data = assemble_foi_data(bm, form_data, download_time)
@@ -2220,11 +2445,28 @@ def foi(bookmark_id):
             with open(tmp_path, "wb") as f:
                 f.write(docx_buf.getvalue())
             _TEMP_DOCS[doc_token] = (tmp_path, filename)
+            # ── Wasabi upload ─────────────────────────────────────────────────
+            wasabi_ts  = ""
+            wasabi_err = ""
+            if delivery in ("cloud", "both") and wp:
+                try:
+                    docx_buf.seek(0)
+                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, filename)
+                except Exception as ue:
+                    wasabi_err = str(ue)
+                    print(f"Wasabi upload error (FOI): {ue}")
+            # ─────────────────────────────────────────────────────────────────
             docx_buf.seek(0)
             resp = send_file(docx_buf, as_attachment=True, download_name=filename,
                 mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            resp.headers["X-Doc-Token"] = doc_token
-            resp.headers["Access-Control-Expose-Headers"] = "X-Doc-Token"
+            resp.headers["X-Doc-Token"]        = doc_token
+            resp.headers["X-Delivery"]         = delivery
+            resp.headers["X-Wasabi-Uploaded"]  = "true" if wasabi_ts else "false"
+            resp.headers["X-Wasabi-Timestamp"] = wasabi_ts
+            resp.headers["X-Wasabi-Error"]     = wasabi_err
+            resp.headers["Access-Control-Expose-Headers"] = (
+                "X-Doc-Token, X-Delivery, X-Wasabi-Uploaded, X-Wasabi-Timestamp, X-Wasabi-Error"
+            )
             return resp
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -2236,7 +2478,8 @@ def foi(bookmark_id):
     today    = datetime.now().strftime("%d/%m/%Y")
     initials = session.get("initials", "XX")
     return render_template_string(FOI_FORM_HTML, bm=bm, session=session,
-                                  today=today, initials=initials, site_ref=SITE_REF)
+                                  today=today, initials=initials, site_ref=SITE_REF,
+                                  wasabi_found=wasabi_found, wasabi_prefix=wasabi_prefix)
 
 @app.route("/send-email", methods=["POST"])
 @login_required
