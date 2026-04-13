@@ -202,7 +202,7 @@ def _normalise_slug(name):
     Strips [C]/[D] upload tags, lowercases, replaces non-alphanumeric with hyphens."""
     import re
     s = name.lower().strip()
-    s = re.sub(r'\s*\[[cdCD]\]\s*', '', s)   # remove [C] [c] [D] [d] tags
+    s = re.sub(r'\s*\[[cdCD]\]\s*', '', s)   # remove [C]/[D] tags (case-insensitive)
     s = re.sub(r'[^a-z0-9]+', '-', s)         # spaces/specials → hyphens
     s = re.sub(r'-+', '-', s).strip('-')       # collapse duplicates
     return s
@@ -1071,7 +1071,7 @@ function toggleSidebar(){
         {% for bm in bookmarks %}
         <div class="bm">
             <div class="bm-info">
-                <div class="bm-name">{{ bm.name or "(No name)" }}<span class="id-badge">{{ bm.record_id }}</span>{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}<span class="cloud-tag cloud-tag-c">&#9729; Cloud</span>{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}<span class="cloud-tag cloud-tag-d">&#8987; Deferred</span>{% endif %}</div>
+                <div class="bm-name">{{ bm.name or "(No name)" }}<span class="id-badge">{{ bm.record_id }}</span>{% if '[C]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-c">&#9729; Cloud</span>{% elif '[D]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-d">&#8987; Deferred</span>{% endif %}</div>
                 <div class="bm-desc">{{ bm.description or "No description" }}</div>
                 <div class="bm-time">{{ bm.start_fmt }} → {{ bm.end_fmt }}</div>
             </div>
@@ -1471,7 +1471,7 @@ function toggleSidebar(){
         {% if wasabi_found %}
         <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
             <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:4px;">&#9729;&#65039; Statement Delivery</div>
-            <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
+            <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '').upper() %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '').upper() %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
             <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;flex-wrap:wrap;">
                 <span style="font-size:12px;color:#3fb950;">&#10003; Package confirmed</span>
                 {% if wasabi_arrived %}<span style="font-size:12px;color:#8b949e;font-family:'DM Mono',monospace;">{{ wasabi_arrived }}</span>{% endif %}
@@ -1492,9 +1492,9 @@ function toggleSidebar(){
         </div>
         {% else %}
         <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
-            {% if '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}
+            {% if '[D]' in (bm.name or '').upper() %}
             <div style="font-size:12px;color:#8b949e;">&#8987; <strong style="color:#d29922;">[D] Deferred upload</strong> — footage not yet in cloud. Check again after 06:00. <strong style="color:#e6edf3;">Download only for now.</strong></div>
-            {% elif '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}
+            {% elif '[C]' in (bm.name or '').upper() %}
             <div style="font-size:12px;color:#8b949e;">&#9888;&#65039; <strong style="color:#f85149;">[C] Cloud bookmark</strong> — footage not found in cloud. <strong style="color:#e6edf3;">Download only.</strong> Contact CCTV team if upload is expected.</div>
             {% else %}
             <div style="font-size:12px;color:#8b949e;">&#9729;&#65039; No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>.</div>
@@ -2113,7 +2113,7 @@ function toggleSidebar(){
         {% if wasabi_found %}
         <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
             <div style="font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:4px;">&#9729;&#65039; Disclosure Record Delivery</div>
-            <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
+            <div style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;margin-bottom:10px;">{% if '[C]' in (bm.name or '').upper() %}[C] instant cloud bookmark — footage confirmed at page load{% elif '[D]' in (bm.name or '').upper() %}[D] deferred bookmark — footage now confirmed in cloud{% else %}footage confirmed in cloud at page load{% endif %}</div>
             <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;flex-wrap:wrap;">
                 <span style="font-size:12px;color:#3fb950;">&#10003; Package confirmed</span>
                 {% if wasabi_arrived %}<span style="font-size:12px;color:#8b949e;font-family:'DM Mono',monospace;">{{ wasabi_arrived }}</span>{% endif %}
@@ -2134,9 +2134,9 @@ function toggleSidebar(){
         </div>
         {% else %}
         <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
-            {% if '[D]' in (bm.name or '') or '[d]' in (bm.name or '') %}
+            {% if '[D]' in (bm.name or '').upper() %}
             <div style="font-size:12px;color:#8b949e;">&#8987; <strong style="color:#d29922;">[D] Deferred upload</strong> — footage not yet in cloud. Check again after 06:00. <strong style="color:#e6edf3;">Download only for now.</strong></div>
-            {% elif '[C]' in (bm.name or '') or '[c]' in (bm.name or '') %}
+            {% elif '[C]' in (bm.name or '').upper() %}
             <div style="font-size:12px;color:#8b949e;">&#9888;&#65039; <strong style="color:#f85149;">[C] Cloud bookmark</strong> — footage not found in cloud. <strong style="color:#e6edf3;">Download only.</strong> Contact CCTV team if upload is expected.</div>
             {% else %}
             <div style="font-size:12px;color:#8b949e;">&#9729;&#65039; No footage found in cloud for this bookmark — <strong style="color:#e6edf3;">Download only</strong>.</div>
