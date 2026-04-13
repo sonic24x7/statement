@@ -20,7 +20,7 @@
 |--------|-------|
 | App directory | `/opt/CCTV_Statement/` |
 | Python environment | `/opt/CCTV_Statement/venv/` |
-| API key file | `/opt/CCTV_Statement/.env` |
+| Environment file | `/opt/CCTV_Statement/.env` |
 | Service name | `cctv-statement` |
 | Port | `5000` |
 | Runs as | `root` (via systemd) |
@@ -128,13 +128,13 @@ Should print a version number with no errors.
 
 ---
 
-## Step 6b — (Optional) Install Ollama for Local AI
+## Step 6b — Install Ollama (Required)
 
-> **Skip this step if using Anthropic.** Use this instead if you want no data to leave the building — removes any third-party data processing concern.
+All AI inference runs locally via Ollama — no data leaves the building.
 
 ```
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3
+ollama pull llama3.1
 ```
 
 Verify Ollama is running:
@@ -145,16 +145,7 @@ curl http://localhost:11434
 
 Should return `Ollama is running`.
 
-Then in your `.env` file (Step 7), set:
-
-```
-AI_BACKEND=ollama
-OLLAMA_MODEL=llama3
-```
-
-And **remove or leave blank** the `ANTHROPIC_API_KEY` line — it is not needed.
-
-**Minimum server spec for Ollama:**
+**Minimum server spec:**
 
 | Resource | Minimum |
 |----------|---------|
@@ -166,10 +157,6 @@ And **remove or leave blank** the `ANTHROPIC_API_KEY` line — it is not needed.
 
 ## Step 7 — Create the Environment File
 
-> **This is the correct method for Ubuntu 24.04.**
-> Do NOT put the key directly in the systemd service file using Environment= — it will not be passed to the process reliably.
-> Always use EnvironmentFile= pointing to a .env file.
-
 ```
 nano /opt/CCTV_Statement/.env
 ```
@@ -177,15 +164,12 @@ nano /opt/CCTV_Statement/.env
 Add these lines — replace the values with your actual credentials:
 
 ```
-AI_BACKEND=anthropic
-ANTHROPIC_API_KEY=sk-ant-YOUR_FULL_KEY_HERE
+OLLAMA_MODEL=llama3.1
 GMAIL_USER=rmbcvms@gmail.com
 GMAIL_APP_PASSWORD=your-16-char-app-password
 ```
 
-> **Note:** `GMAIL_USER` and `GMAIL_APP_PASSWORD` are required for the email feature (v6.1+). If you leave them blank the app will still run and generate statements, but the "Send by Email" button will return an error.
->
-> **Ollama (local AI):** To run without sending data to Anthropic, see **Step 6b** below.
+> **Note:** `GMAIL_USER` and `GMAIL_APP_PASSWORD` are required for the email feature. If you leave them blank the app will still run and generate statements, but the "Send by Email" button will return an error.
 
 Save with `Ctrl+X` then `Y` then `Enter`
 
@@ -277,13 +261,14 @@ The `enable` command ensures the service **automatically starts on every reboot*
 
 ---
 
-## Step 12 — Verify the API Key Is Reaching the Process
+## Step 12 — Verify Ollama Is Reachable and the Model Is Loaded
 
 ```
-sudo cat /proc/$(pgrep -f cctv_app)/environ | tr '\0' '\n' | grep ANTHROPIC
+curl http://localhost:11434
+ollama list
 ```
 
-Should print your full API key. If blank — the `.env` file has a problem. Check Step 7.
+First command should return `Ollama is running`. Second should show `llama3.1` in the list. If the model is missing run `ollama pull llama3.1`.
 
 ---
 
@@ -347,7 +332,8 @@ sudo systemctl status cctv-statement
 | Check status | `systemctl status cctv-statement` |
 | Check port open | `ss -tlnp \| grep 5000` |
 | Check firewall | `ufw status` |
-| Verify API key live | `sudo cat /proc/$(pgrep -f cctv_app)/environ \| tr '\0' '\n' \| grep ANTHROPIC` |
+| Check Ollama running | `curl http://localhost:11434` |
+| Check Ollama model | `ollama list` |
 | Check line count | `wc -l /opt/CCTV_Statement/cctv_app.py` |
 | Check routes | `grep -n "@app.route" /opt/CCTV_Statement/cctv_app.py` |
 | Test Flask import | `/opt/CCTV_Statement/venv/bin/python3 -c "import flask; print(flask.__version__)"` |
@@ -361,10 +347,8 @@ sudo systemctl status cctv-statement
 | `No module named 'flask'` | pip installed to wrong Python | Use venv pip: `/opt/CCTV_Statement/venv/bin/pip install flask python-docx requests` |
 | `Permission denied` writing service file | Not using sudo | Use `sudo bash -c 'cat > ...'` as shown in Step 10 |
 | Browser refuses to connect | Port 5000 not open | Run `ufw allow 5000/tcp && ufw reload` |
-| 500 error generating statement | API key not reaching process | Check `.env` file exists, run Step 12 to verify |
-| API key blank in process | Used `Environment=` instead of `EnvironmentFile=` | Rewrite service file using `EnvironmentFile=` as shown in Step 10 |
-| 401 Unauthorized from Anthropic | Wrong or expired API key | Test key with curl, regenerate at console.anthropic.com if needed |
-| 500 error with Ollama | Ollama not running or model not pulled | Run `ollama serve` and `ollama pull llama3` |
+| 500 error generating statement | Ollama not running or model not pulled | Run `curl http://localhost:11434` to check, then `ollama pull llama3.1` |
+| 500 error with Ollama | Ollama not running or model not pulled | Run `ollama serve` and `ollama pull llama3.1` |
 | Service not starting after reboot | Not enabled | Run `systemctl enable cctv-statement` |
 
 ---
