@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v7.1 — remove contact number/email field from SYP/RMBC form and Ollama prompt — field was required but never written into document or statement body)
+cctv_app.py  (v7.2 — remove Flare Ref from SYP; cloud card accents on index; strip Hikvision/NX text; exact clock diff precision)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -437,7 +437,7 @@ Bookmark name: {bm.get('name')}
 Bookmark created: {bm.get('created_fmt')}
 
 === SYSTEM DESCRIPTION — COPY THIS VERBATIM, DO NOT CHANGE ANY WORD ===
-The CCTV system at this location is referenced as {SITE_REF}. The system is owned and operated by Rotherham Metropolitan Borough Council and comprises networked Hikvision cameras integrated with the Nx Witness video management system developed by Network Optix. At the time of review, the system was operating on software version 6.1.0.42176.
+The CCTV system at this location is referenced as {SITE_REF}. The system is owned and operated by Rotherham Metropolitan Borough Council.
 The footage referred to in this statement was captured by a camera installed on {form.get('camera_location', 'Lamp Post')} at {form.get('incident_location', 'the above location')}.
 
 === BOOKMARK CREATION — COPY THIS VERBATIM, DO NOT CHANGE ANY WORD ===
@@ -989,8 +989,12 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:
 .container{max-width:900px;margin:24px auto;padding:0 16px;}
 .page-title{font-size:20px;font-weight:700;margin-bottom:4px;}
 .page-sub{color:#8b949e;font-size:13px;margin-bottom:20px;}
-.bm{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 20px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;border-left:3px solid #238636;gap:12px;flex-wrap:wrap;}
+.bm{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 20px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;border-left:4px solid #30363d;gap:12px;flex-wrap:wrap;}
 .bm:hover{border-color:#58a6ff;border-left-color:#58a6ff;}
+.bm-cloud{background:#0b1f12;border-color:#238636;border-left-color:#3fb950;}
+.bm-cloud:hover{border-color:#3fb950;border-left-color:#3fb950;}
+.bm-deferred{background:#1a1200;border-color:#d29922;border-left-color:#d29922;}
+.bm-deferred:hover{border-color:#e3b341;border-left-color:#e3b341;}
 .bm-info{flex:1;min-width:0;}
 .bm-name{font-size:15px;font-weight:600;margin-bottom:3px;}
 .bm-desc{font-size:13px;color:#8b949e;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -1068,7 +1072,7 @@ function toggleSidebar(){
     <div class="page-sub">Choose a bookmark to generate a Witness Statement or FOI Disclosure Record.</div>
     {% if bookmarks %}
         {% for bm in bookmarks %}
-        <div class="bm">
+        <div class="bm{% if '[C]' in (bm.name or '').upper() %} bm-cloud{% elif '[D]' in (bm.name or '').upper() %} bm-deferred{% endif %}">
             <div class="bm-info">
                 <div class="bm-name">{{ bm.name or "(No name)" }}{% if '[C]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-c">&#9729; Cloud</span>{% elif '[D]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-d">&#8987; Deferred</span>{% endif %}</div>
                 <div class="bm-desc">{{ bm.description or "No description" }}</div>
@@ -1249,9 +1253,11 @@ function toggleSidebar(){
                     <div><label>Incident / Crime Name</label><input type="text" name="crime_name" placeholder="e.g. Criminal Damage"></div>
                     <div><label>Crime Reference Number <span>(if known)</span></label><input type="text" name="crime_number" placeholder="e.g. 22/12345/24"></div>
                 </div>
+                {% if pipeline != 'syp' %}
                 <div class="row">
                     <div><label>Flare Reference</label><input type="text" name="flare_ref" placeholder="e.g. FLR-2026-001"></div>
                 </div>
+                {% endif %}
             </div>
         </div>
 
@@ -1322,7 +1328,7 @@ function toggleSidebar(){
                 </div>
                 <div class="row">
                     <div><label>NVR System Displayed</label><input type="text" name="nvr_clock_time" placeholder="e.g. 08:45:07"></div>
-                    <div><label>Difference</label><input type="text" name="clock_difference" placeholder="e.g. 5 minutes"></div>
+                    <div><label>Difference</label><input type="text" name="clock_difference" placeholder="e.g. 8 seconds"></div>
                 </div>
                 <div>
                     <label>NVR Clock Is</label>
@@ -1666,12 +1672,11 @@ function useTheseTimesForClockCheck() {
     var dMins = Math.floor(absDiff / 60);
     var dSecs = absDiff % 60;
     if (df) {
-        if (absDiff < 10)   df.value = 'less than 10 seconds';
-        else if (dMins > 0) df.value = dMins + ' minute' + (dMins > 1 ? 's' : '') + ' and ' + dSecs + ' seconds';
-        else                df.value = dSecs + ' seconds';
+        if (dMins > 0) df.value = dMins + ' minute' + (dMins !== 1 ? 's' : '') + ' and ' + dSecs + ' second' + (dSecs !== 1 ? 's' : '');
+        else           df.value = absDiff + ' second' + (absDiff !== 1 ? 's' : '');
     }
     if (fs) {
-        if (absDiff < 10)       fs.value = 'accurate';
+        if (absDiff === 0)      fs.value = 'accurate';
         else if (diffSecs > 0)  fs.value = 'fast';
         else                    fs.value = 'slow';
     }
@@ -2297,9 +2302,10 @@ function foiUseTheseTimes() {
     var dMins = Math.floor(absDiff / 60);
     var dSecs = absDiff % 60;
     if (df) {
-        if (absDiff < 10)   df.value = 'Less than 10 seconds — accurate';
-        else if (dMins > 0) df.value = dMins + ' minute' + (dMins > 1 ? 's' : '') + ' and ' + dSecs + ' seconds ' + (diffSecs > 0 ? 'fast' : 'slow');
-        else                df.value = dSecs + ' seconds ' + (diffSecs > 0 ? 'fast' : 'slow');
+        var dir = absDiff === 0 ? '' : (' ' + (diffSecs > 0 ? 'fast' : 'slow'));
+        if (absDiff === 0)     df.value = 'accurate';
+        else if (dMins > 0)    df.value = dMins + ' minute' + (dMins !== 1 ? 's' : '') + ' and ' + dSecs + ' second' + (dSecs !== 1 ? 's' : '') + dir;
+        else                   df.value = absDiff + ' second' + (absDiff !== 1 ? 's' : '') + dir;
     }
     var gs = document.querySelector('.green-section');
     if (gs) gs.scrollIntoView({behavior:'smooth', block:'center'});
