@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v6.9 — GUI refinements: sub-labels on bookmark buttons, delivery default to both when cloud found, responsibility block moved below delivery, FOI ref removed from SYP/RMBC form, orphaned electronic_fields removed, RMBC handover note, unified success box)
+cctv_app.py  (v7.0 — GUI refinements cont: clock moved into NVR check section, record ID badge removed, bookmark sub-labels updated, FOI exhibit merged into section 6, FOI sections renumbered 1–9, FOI delivery default to both when cloud found)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -1071,7 +1071,7 @@ function toggleSidebar(){
         {% for bm in bookmarks %}
         <div class="bm">
             <div class="bm-info">
-                <div class="bm-name">{{ bm.name or "(No name)" }}<span class="id-badge">{{ bm.record_id }}</span>{% if '[C]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-c">&#9729; Cloud</span>{% elif '[D]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-d">&#8987; Deferred</span>{% endif %}</div>
+                <div class="bm-name">{{ bm.name or "(No name)" }}{% if '[C]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-c">&#9729; Cloud</span>{% elif '[D]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-d">&#8987; Deferred</span>{% endif %}</div>
                 <div class="bm-desc">{{ bm.description or "No description" }}</div>
                 <div class="bm-time">{{ bm.start_fmt }} → {{ bm.end_fmt }}</div>
             </div>
@@ -1080,15 +1080,15 @@ function toggleSidebar(){
                 <div class="btn-row">
                     <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
                         <a href="/syp/{{ bm.record_id }}" class="btn btn-syp">SYP Statement</a>
-                        <span style="font-size:10px;color:#484f58;">Police / MG11</span>
+                        <span style="font-size:10px;color:#484f58;">Police investigation — includes DEMS</span>
                     </div>
                     <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
                         <a href="/rmbc/{{ bm.record_id }}" class="btn btn-rmbc">RMBC Statement</a>
-                        <span style="font-size:10px;color:#484f58;">Internal / civil</span>
+                        <span style="font-size:10px;color:#484f58;">Internal use</span>
                     </div>
                     <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
                         <a href="/foi/{{ bm.record_id }}" class="btn btn-foi">FOI Record</a>
-                        <span style="font-size:10px;color:#484f58;">Disclosure / request</span>
+                        <span style="font-size:10px;color:#484f58;">Public, solicitor, or insurance disclosure</span>
                     </div>
                 </div>
             </div>
@@ -1202,28 +1202,6 @@ function toggleSidebar(){
 </div>
 <div class="container">
 
-    <div class="clock-box">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center;">
-            <div>
-                <div class="clock-label">📅 UK Official Time (Browser)</div>
-                <div class="clock-date" id="liveDate">Loading...</div>
-                <div class="clock-time" id="liveTime">--:--:--</div>
-                <div class="clock-utc" id="tzLabel">Loading...</div>
-            </div>
-            <div>
-                <div class="clock-label">🖥️ NVR Server Time</div>
-                <div class="clock-date" id="serverDate">Loading...</div>
-                <div class="clock-time" style="font-size:36px;">
-                    <span id="serverTimeHHMM">--:--:</span><span id="serverTimeSS" style="transition:color 1.5s ease;color:#58a6ff;">--</span>
-                </div>
-                <div class="clock-utc" id="serverDiff">Fetching...</div>
-            </div>
-        </div>
-        <button type="button" onclick="useTheseTimesForClockCheck()" style="margin-top:16px;background:#238636;color:white;border:none;border-radius:6px;padding:10px 24px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
-            ✅ Use These Times for Clock Check
-        </button>
-    </div>
-
     <div class="incident">
         <h3>📋 Incident: {{ bm.name }}</h3>
         <p>
@@ -1314,6 +1292,27 @@ function toggleSidebar(){
         <!-- 5. NVR CLOCK CHECK -->
         <div class="green-section">
             <h3>🕐 NVR Clock Check</h3>
+            <div class="clock-box" style="margin-bottom:16px;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center;">
+                    <div>
+                        <div class="clock-label">📅 UK Official Time (Browser)</div>
+                        <div class="clock-date" id="liveDate">Loading...</div>
+                        <div class="clock-time" id="liveTime">--:--:--</div>
+                        <div class="clock-utc" id="tzLabel">Loading...</div>
+                    </div>
+                    <div>
+                        <div class="clock-label">🖥️ NVR Server Time</div>
+                        <div class="clock-date" id="serverDate">Loading...</div>
+                        <div class="clock-time" style="font-size:36px;">
+                            <span id="serverTimeHHMM">--:--:</span><span id="serverTimeSS" style="transition:color 1.5s ease;color:#58a6ff;">--</span>
+                        </div>
+                        <div class="clock-utc" id="serverDiff">Fetching...</div>
+                    </div>
+                </div>
+                <button type="button" onclick="useTheseTimesForClockCheck()" style="margin-top:16px;background:#238636;color:white;border:none;border-radius:6px;padding:10px 24px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
+                    ✅ Use These Times for Clock Check
+                </button>
+            </div>
             <div class="toggle-row">
                 <input type="checkbox" id="clock_checked_box" name="clock_checked" value="yes">
                 <label for="clock_checked_box">I have checked the NVR clock against the BT Speaking Clock</label>
@@ -2044,9 +2043,9 @@ function toggleSidebar(){
             </div>
         </div>
 
-        <!-- S7: Format & Delivery -->
+        <!-- 6: Format, Delivery & Exhibit -->
         <div class="section">
-            <h3>💿 Section 7 · Format &amp; Method of Disclosure</h3>
+            <h3>💿 Section 6 · Format, Delivery &amp; Exhibit</h3>
             <div class="row">
                 <div>
                     <label>Export Format</label>
@@ -2082,17 +2081,15 @@ function toggleSidebar(){
                     </select>
                 </div>
             </div>
+            <div style="margin-top:14px;">
+                <label>Exhibit ID</label>
+                <input type="text" name="exhibit_ref" value="{{ initials }}1" required>
+            </div>
         </div>
 
-        <!-- S8: Exhibit -->
-        <div class="section">
-            <h3>🏷️ Section 8 · Exhibit Reference</h3>
-            <div><label>Exhibit ID</label><input type="text" name="exhibit_ref" value="{{ initials }}1" required></div>
-        </div>
-
-        <!-- S10: Redaction -->
+        <!-- 7: Redaction -->
         <div class="purple-section">
-            <h3>Section 10 · Redaction Guidance</h3>
+            <h3>Section 7 · Redaction Guidance</h3>
             <p style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.6;">This is the engineer's assessment only. The FOI Team / Information Governance makes the final redaction decision.</p>
             <div>
                 <label>Does footage require redacting?</label>
@@ -2103,9 +2100,9 @@ function toggleSidebar(){
             </div>
         </div>
 
-        <!-- S11: Time Verification (optional) -->
+        <!-- 8: Time Verification (optional) -->
         <div class="green-section">
-            <h3>🕐 Section 11 · Time Synchronisation Verification <span>optional</span></h3>
+            <h3>🕐 Section 8 · Time Synchronisation Verification <span>optional</span></h3>
             <div class="toggle-row">
                 <input type="checkbox" id="timeVerifyCheck" name="time_verified" value="yes" onchange="toggleTimeVerify(this)">
                 <label for="timeVerifyCheck">Time verification was performed against BT Speaking Clock</label>
@@ -2120,9 +2117,9 @@ function toggleSidebar(){
             </div>
         </div>
 
-        <!-- S12: Authorisation -->
+        <!-- 9: Authorisation -->
         <div class="section">
-            <h3>👤 Section 12 · Authorisation — Completed By</h3>
+            <h3>👤 Section 9 · Authorisation — Completed By</h3>
             <div class="row">
                 <div><label>Full Name</label><input type="text" name="witness_name" value="{{ session.user_name }}" required></div>
                 <div><label>Role</label><input type="text" name="witness_role" value="{{ session.user_role }}" required></div>
@@ -2145,13 +2142,13 @@ function toggleSidebar(){
             <div style="font-size:12px;color:#484f58;margin-bottom:14px;">Choose how to deliver this disclosure record:</div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> &#11015;&#65039; Download only
+                    <input type="radio" name="delivery" value="download" style="width:auto;"> &#11015;&#65039; Download only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
                     <input type="radio" name="delivery" value="cloud" style="width:auto;"> &#9729;&#65039; Save into cloud package only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="both" style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
+                    <input type="radio" name="delivery" value="both" checked style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
                 </label>
             </div>
             <div style="font-size:11px;color:#484f58;margin-top:12px;line-height:1.5;">Saving into the cloud package retains this bookmark's footage beyond the normal overwrite cycle under the Wasabi retention workflow.</div>
