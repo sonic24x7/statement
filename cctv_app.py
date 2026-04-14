@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v6.7 — Cloud package timeline: arrival time + statement save time shown together)
+cctv_app.py  (v6.9 — GUI refinements: sub-labels on bookmark buttons, delivery default to both when cloud found, responsibility block moved below delivery, FOI ref removed from SYP/RMBC form, orphaned electronic_fields removed, RMBC handover note, unified success box)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -1078,9 +1078,18 @@ function toggleSidebar(){
             <div class="bm-right">
                 <div class="dur">{{ bm.duration_fmt }}</div>
                 <div class="btn-row">
-                    <a href="/syp/{{ bm.record_id }}" class="btn btn-syp">SYP Statement</a>
-                    <a href="/rmbc/{{ bm.record_id }}" class="btn btn-rmbc">RMBC Statement</a>
-                    <a href="/foi/{{ bm.record_id }}" class="btn btn-foi">FOI Record</a>
+                    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
+                        <a href="/syp/{{ bm.record_id }}" class="btn btn-syp">SYP Statement</a>
+                        <span style="font-size:10px;color:#484f58;">Police / MG11</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
+                        <a href="/rmbc/{{ bm.record_id }}" class="btn btn-rmbc">RMBC Statement</a>
+                        <span style="font-size:10px;color:#484f58;">Internal / civil</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
+                        <a href="/foi/{{ bm.record_id }}" class="btn btn-foi">FOI Record</a>
+                        <span style="font-size:10px;color:#484f58;">Disclosure / request</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1266,7 +1275,6 @@ function toggleSidebar(){
                 </div>
                 <div class="row">
                     <div><label>Flare Reference</label><input type="text" name="flare_ref" placeholder="e.g. FLR-2026-001"></div>
-                    <div><label>FOI Reference <span>(if applicable)</span></label><input type="text" name="foi_ref" placeholder="Leave blank if not applicable"></div>
                 </div>
             </div>
         </div>
@@ -1348,16 +1356,6 @@ function toggleSidebar(){
                     </select>
                 </div>
             </div>
-            <div id="electronic_fields" style="display:none;margin-top:14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;">
-                <div style="font-size:12px;color:#58a6ff;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">📡 DEMS Transfer Details</div>
-                <div class="row">
-                    <div><label>Date of Upload</label><input type="text" name="electronic_date" placeholder="e.g. 01/03/2026"></div>
-                    <div><label>Time of Upload</label><input type="text" name="electronic_time" placeholder="e.g. 09:30"></div>
-                </div>
-                <div><label>Uploaded By</label><input type="text" name="electronic_by" value="{{ session.user_name }}"></div>
-                <div><label>Recipient / Access Provided To</label><input type="text" name="electronic_recipient" placeholder="e.g. DS Smith, South Yorkshire Police"></div>
-                <div><label>DEMS Reference / Job Number <span>(if known)</span></label><input type="text" name="electronic_ref" placeholder="Leave blank if not yet known"></div>
-            </div>
         </div>
 
         <!-- 7. HANDOVER -->
@@ -1408,6 +1406,7 @@ function toggleSidebar(){
                     <div class="icon">👷</div>
                     <div class="title">Personal Handover</div>
                     <div class="sub">Handed directly to officer</div>
+                    <div style="font-size:10px;color:#484f58;margin-top:6px;line-height:1.4;">For police / criminal investigation, use SYP Statement instead.</div>
                 </div>
                 <div class="h-opt active" id="opt_storage" onclick="setHandover('storage')">
                     <input type="radio" name="handover_type" value="storage" checked>
@@ -1455,18 +1454,6 @@ function toggleSidebar(){
             </div>
         </div>
 
-        <!-- Officer Responsibility Agreement — always shown at bottom -->
-        <div style="background:#1a1200;border:1px solid #d29922;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
-            <div style="font-size:13px;font-weight:700;color:#d29922;margin-bottom:10px;">Officer Responsibility</div>
-            <p style="font-size:13px;color:#c9a227;line-height:1.7;margin-bottom:14px;">
-                Once this footage is downloaded, it is the responsibility of the receiving officer to keep it secure and auditable in accordance with the security and accountability principles of UK GDPR (Article 5).
-            </p>
-            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:13px;color:#d29922;font-weight:400;">
-                <input type="checkbox" id="responsibilityCheck" onchange="toggleSubmit(this)" style="width:auto;margin-top:2px;flex-shrink:0;">
-                I acknowledge and accept responsibility for the secure handling of this footage.
-            </label>
-        </div>
-
         <!-- ── Cloud delivery options ──────────────────────────────────── -->
         {% if wasabi_found %}
         <div style="background:#0d1f2d;border:1px solid #1f4068;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
@@ -1479,13 +1466,13 @@ function toggleSidebar(){
             <div style="font-size:12px;color:#484f58;margin-bottom:14px;">Choose how to deliver this statement:</div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="download" checked style="width:auto;"> &#11015;&#65039; Download only
+                    <input type="radio" name="delivery" value="download" style="width:auto;"> &#11015;&#65039; Download only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
                     <input type="radio" name="delivery" value="cloud" style="width:auto;"> &#9729;&#65039; Save into cloud package only
                 </label>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:14px;color:#e6edf3;font-weight:400;">
-                    <input type="radio" name="delivery" value="both" style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
+                    <input type="radio" name="delivery" value="both" checked style="width:auto;"> &#11015;&#65039;&#9729;&#65039; Download + save into cloud package
                 </label>
             </div>
             <div style="font-size:11px;color:#484f58;margin-top:12px;line-height:1.5;">Saving into the cloud package retains this bookmark's footage beyond the normal overwrite cycle under the Wasabi retention workflow.</div>
@@ -1506,6 +1493,18 @@ function toggleSidebar(){
         {% endif %}
         <!-- ───────────────────────────────────────────────────────────────── -->
 
+        <!-- Officer Responsibility Agreement — after all delivery choices -->
+        <div style="background:#1a1200;border:1px solid #d29922;border-radius:10px;padding:20px 24px;margin-bottom:14px;">
+            <div style="font-size:13px;font-weight:700;color:#d29922;margin-bottom:10px;">Officer Responsibility</div>
+            <p style="font-size:13px;color:#c9a227;line-height:1.7;margin-bottom:14px;">
+                Once this footage is downloaded, it is the responsibility of the receiving officer to keep it secure and auditable in accordance with the security and accountability principles of UK GDPR (Article 5).
+            </p>
+            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-size:13px;color:#d29922;font-weight:400;">
+                <input type="checkbox" id="responsibilityCheck" onchange="toggleSubmit(this)" style="width:auto;margin-top:2px;flex-shrink:0;">
+                I acknowledge and accept responsibility for the secure handling of this footage.
+            </label>
+        </div>
+
         <button type="submit" class="submit-btn" id="submitBtn" disabled style="opacity:0.5;cursor:not-allowed;">&#9889; Generate Witness Statement</button>
 
         <div id="loadingBox">
@@ -1518,46 +1517,59 @@ function toggleSidebar(){
 </div>
 
 <div id="successBox" style="display:none;max-width:820px;margin:0 auto;padding:0 20px 80px;">
-    <div style="background:#0d2b0d;border:1px solid #238636;border-radius:10px;padding:30px;text-align:center;">
-        <div style="font-size:44px;margin-bottom:12px;">&#10003;</div>
-        <div style="font-size:20px;font-weight:700;color:#3fb950;margin-bottom:6px;">Statement Generated</div>
-        <div id="successSubtitle" style="font-size:13px;color:#8b949e;margin-bottom:16px;">Your Word document is downloading now.</div>
-        <div id="cloudTimeline" style="display:none;background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:14px 18px;margin-bottom:20px;text-align:left;">
-            <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:10px;font-family:'DM Mono',monospace;">Cloud Package Timeline</div>
-            <div style="display:flex;flex-direction:column;gap:9px;">
+    <div style="background:#0d1117;border:1px solid #238636;border-radius:10px;overflow:hidden;">
+
+        <!-- Header -->
+        <div style="background:#0d2b0d;padding:24px 30px;text-align:center;border-bottom:1px solid #21262d;">
+            <div style="font-size:36px;margin-bottom:8px;">&#10003;</div>
+            <div style="font-size:18px;font-weight:700;color:#3fb950;margin-bottom:4px;">Statement Generated</div>
+            <div id="successSubtitle" style="font-size:13px;color:#8b949e;">Your Word document is downloading now.</div>
+        </div>
+
+        <!-- Cloud timeline (shown only when uploaded) -->
+        <div id="cloudTimeline" style="display:none;padding:14px 24px;border-bottom:1px solid #21262d;background:#0a1628;">
+            <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:8px;font-family:'DM Mono',monospace;">Cloud Package Timeline</div>
+            <div style="display:flex;flex-direction:column;gap:7px;">
                 <div style="display:flex;gap:12px;align-items:baseline;">
-                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:160px;flex-shrink:0;">&#128230; Package confirmed</span>
+                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:150px;flex-shrink:0;">&#128230; Package confirmed</span>
                     <span id="tlArrived" style="font-size:13px;color:#8b949e;font-family:'DM Mono',monospace;"></span>
                 </div>
                 <div style="display:flex;gap:12px;align-items:baseline;">
-                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:160px;flex-shrink:0;">&#128196; Statement saved</span>
+                    <span style="font-size:11px;color:#484f58;font-family:'DM Mono',monospace;min-width:150px;flex-shrink:0;">&#128196; Statement saved</span>
                     <span id="tlSaved" style="font-size:13px;color:#3fb950;font-family:'DM Mono',monospace;"></span>
                 </div>
             </div>
         </div>
-        <div id="cloudError" style="display:none;font-size:13px;color:#f85149;margin-bottom:20px;"></div>
-        <a href="/" style="background:#21262d;color:#e6edf3;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">&#8592; New Statement</a>
-    </div>
-    <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
-        <div style="font-size:13px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #21262d;">Email Statement</div>
-        <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:end;">
-            <div>
-                <div style="font-size:11px;color:#8b949e;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Recipient Name</div>
-                <input type="text" id="emailRecipName" placeholder="e.g. david.brown" style="width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
+        <div id="cloudError" style="display:none;font-size:13px;color:#f85149;padding:12px 24px;border-bottom:1px solid #21262d;"></div>
+
+        <!-- Email section -->
+        <div style="padding:20px 24px;border-bottom:1px solid #21262d;">
+            <div style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">Send by Email</div>
+            <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:end;">
+                <div>
+                    <div style="font-size:11px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.4px;">Recipient Name</div>
+                    <input type="text" id="emailRecipName" placeholder="e.g. david.brown" style="width:100%;padding:9px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
+                </div>
+                <div style="padding-bottom:2px;font-size:18px;color:#484f58;text-align:center;">@</div>
+                <div>
+                    <div style="font-size:11px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.4px;">Domain</div>
+                    <select id="emailDomain" style="width:100%;padding:9px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
+                        <option value="rotherham.gov.uk">rotherham.gov.uk</option>
+                        <option value="southyorkshire.police.uk">southyorkshire.police.uk</option>
+                    </select>
+                </div>
             </div>
-            <div style="padding-bottom:2px;font-size:18px;color:#484f58;text-align:center;">@</div>
-            <div>
-                <div style="font-size:11px;color:#8b949e;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Domain</div>
-                <select id="emailDomain" style="width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:14px;color:#e6edf3;font-family:'DM Sans',sans-serif;">
-                    <option value="rotherham.gov.uk">rotherham.gov.uk</option>
-                    <option value="southyorkshire.police.uk">southyorkshire.police.uk</option>
-                </select>
-            </div>
+            <div id="emailStatus" style="font-size:13px;margin-top:8px;min-height:18px;"></div>
+            <button onclick="sendEmail()" id="sendEmailBtn" style="width:100%;margin-top:10px;padding:11px;background:#1f4068;color:#58a6ff;border:1px solid #1f4068;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
+                Send Statement by Email
+            </button>
         </div>
-        <div id="emailStatus" style="font-size:13px;margin-top:10px;min-height:20px;"></div>
-        <button onclick="sendEmail()" id="sendEmailBtn" style="width:100%;margin-top:12px;padding:12px;background:#1f4068;color:#58a6ff;border:1px solid #30363d;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
-            Send Statement by Email
-        </button>
+
+        <!-- Footer: New Statement -->
+        <div style="padding:16px 24px;text-align:center;">
+            <a href="/" style="background:#21262d;color:#8b949e;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;">&#8592; New Statement</a>
+        </div>
+
     </div>
 </div>
 
