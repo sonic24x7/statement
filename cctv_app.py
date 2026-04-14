@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v7.0 — GUI refinements cont: clock moved into NVR check section, record ID badge removed, bookmark sub-labels updated, FOI exhibit merged into section 6, FOI sections renumbered 1–9, FOI delivery default to both when cloud found)
+cctv_app.py  (v7.1 — remove contact number/email field from SYP/RMBC form and Ollama prompt — field was required but never written into document or statement body)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -427,7 +427,6 @@ Name: {form.get('witness_name')}
 Role: {form.get('witness_role')}
 Organisation: Rotherham Metropolitan Borough Council
 Currently based at: {form.get('witness_base')}
-Contact: {form.get('witness_contact')}
 Date of statement: {form.get('statement_date')}
 
 === INCIDENT ===
@@ -1234,7 +1233,6 @@ function toggleSidebar(){
                 </div>
             </div>
             <div class="row">
-                <div><label>Contact Number / Email</label><input type="text" name="witness_contact" required></div>
                 <div><label>Date of Statement</label><input type="text" name="statement_date" id="statementDate" value="{{ today }}" required></div>
             </div>
         </div>

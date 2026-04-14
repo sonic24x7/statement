@@ -6,11 +6,11 @@
 ## What You Need Before Starting
 
 - `cctv_app.py` — the Flask application (on your Windows Desktop)
-- Your Anthropic API key (starts with `sk-ant-...`) — have it ready
 - SSH access to the server via Tailscale or local IP
 - Server user: `rmbc` with sudo privileges
 
 > **Important:** Password authentication only. No SSH keys. No `-i` flags. No root SCP.
+> **Note:** No Anthropic API key is required. All AI inference runs locally via Ollama — no data leaves the building.
 
 ---
 
@@ -99,7 +99,7 @@ Verify it arrived correctly:
 wc -l /opt/CCTV_Statement/cctv_app.py
 ```
 
-Should say **2297**. If lower, the transfer cut short — repeat the SCP.
+Should say **2702**. If lower, the transfer cut short — repeat the SCP.
 
 Check routes are present:
 
@@ -107,7 +107,7 @@ Check routes are present:
 grep -n "@app.route" /opt/CCTV_Statement/cctv_app.py
 ```
 
-Should show 5 routes: `/login` `/logout` `/` `/form` `/server-time`
+Should show 9 routes: `/login` `/logout` `/` `/form` `/syp` `/rmbc` `/foi` `/send-email` `/server-time`
 
 ---
 
@@ -115,8 +115,10 @@ Should show 5 routes: `/login` `/logout` `/` `/form` `/server-time`
 
 ```
 python3 -m venv /opt/CCTV_Statement/venv
-/opt/CCTV_Statement/venv/bin/pip install flask python-docx requests
+/opt/CCTV_Statement/venv/bin/pip install flask python-docx requests boto3
 ```
+
+> `boto3` is required for Wasabi cloud storage integration. If you are not using Wasabi, the app will still run without it — cloud features will simply be disabled.
 
 Verify Flask installed correctly:
 
@@ -167,9 +169,24 @@ Add these lines — replace the values with your actual credentials:
 OLLAMA_MODEL=llama3.1
 GMAIL_USER=rmbcvms@gmail.com
 GMAIL_APP_PASSWORD=your-16-char-app-password
+WASABI_ACCESS_KEY=your-wasabi-access-key
+WASABI_SECRET_KEY=your-wasabi-secret-key
+WASABI_BUCKET=cctvserver
+WASABI_REGION=eu-west-1
 ```
 
-> **Note:** `GMAIL_USER` and `GMAIL_APP_PASSWORD` are required for the email feature. If you leave them blank the app will still run and generate statements, but the "Send by Email" button will return an error.
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `OLLAMA_MODEL` | Yes | AI model to use (default: `llama3.1`) |
+| `GMAIL_USER` | Optional | Gmail address for email delivery feature |
+| `GMAIL_APP_PASSWORD` | Optional | 16-character Gmail app password |
+| `WASABI_ACCESS_KEY` | Optional | Wasabi S3 access key for cloud package integration |
+| `WASABI_SECRET_KEY` | Optional | Wasabi S3 secret key |
+| `WASABI_BUCKET` | Optional | Bucket name (default: `cctvserver`) |
+| `WASABI_REGION` | Optional | Bucket region (default: `eu-west-1`) |
+
+> If `GMAIL_USER`/`GMAIL_APP_PASSWORD` are blank, the app runs normally but "Send by Email" will return an error.
+> If Wasabi keys are blank, the app runs normally but cloud package detection and upload are disabled.
 
 Save with `Ctrl+X` then `Y` then `Enter`
 
