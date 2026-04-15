@@ -1002,7 +1002,6 @@ button:hover{background:#2ea043;}
 <body><div class="card">
 <div class="logo">
     <div class="icon">🎥</div>
-    <span class="badge">OFFICIAL SENSITIVE</span>
     <h1>CamScribe</h1>
     <p>Evidence Management System</p>
 </div>
