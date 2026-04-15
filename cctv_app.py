@@ -1090,13 +1090,13 @@ function toggleSidebar(){
     <div class="page-sub">Choose a bookmark to generate a Witness Statement or FOI Disclosure Record.</div>
     {% if bookmarks %}
         {% for bm in bookmarks %}
-        <div class="bm{% if bm.wasabi_confirmed %} bm-cloud{% elif '[C]' in (bm.name or '').upper() or '[D]' in (bm.name or '').upper() %} bm-pending{% endif %}">
+        <div class="bm{% if bm.wasabi_confirmed %} bm-cloud{% elif '[C]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() or '[D]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %} bm-pending{% endif %}">
             <div class="bm-info">
                 {% if bm.wasabi_confirmed %}
                 <div class="bm-status bm-status-confirmed">&#10003; In Wasabi — footage confirmed{% if bm.wasabi_arrived %} · {{ bm.wasabi_arrived }}{% endif %}</div>
-                {% elif '[C]' in (bm.name or '').upper() %}
+                {% elif '[C]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %}
                 <div class="bm-status bm-status-pending">&#9729; Cloud bookmark — not yet in Wasabi</div>
-                {% elif '[D]' in (bm.name or '').upper() %}
+                {% elif '[D]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %}
                 <div class="bm-status bm-status-pending">&#8987; Deferred — scheduled for overnight upload</div>
                 {% else %}
                 <div class="bm-status bm-status-none">&#11015; No cloud tag — download only</div>
