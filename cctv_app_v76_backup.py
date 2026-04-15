@@ -1,16 +1,6 @@
 """
-cctv_app.py  (v7.7 — duplicate statement prevention: same user cannot re-upload to the same Wasabi package; different users can coexist safely)
+cctv_app.py  (v7.6 — index page: real Wasabi check per bookmark on load; card status driven by actual cloud presence)
 ================================================
-Changes from v7.6:
-- Duplicate-upload prevention for Wasabi cloud packages across all 3 pipelines (SYP, RMBC, FOI)
-- check_duplicate_statement(wasabi_prefix, user_initials): lists Wasabi prefix, returns True if a
-  .docx with '-{INITIALS}-' already exists there for the current user
-- cloud_filename now embeds user initials: Statement-{SITE_REF}-{INITIALS}-{datetime}.docx
-  (ensures different users never overwrite each other; same user matched by initials prefix)
-- Upload is skipped (not an error) if duplicate detected; X-Wasabi-Skip: "duplicate" header returned
-- UI shows a clear amber info pill "Statement already in cloud package" when upload was skipped
-- Download remains available regardless of duplicate state
-
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
 - On form load: checks Wasabi for matching footage (video + JSON) for bookmark
@@ -300,31 +290,6 @@ def upload_to_wasabi(docx_bytes, wasabi_prefix, filename):
         ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
     return datetime.now().strftime("%H:%M on %d/%m/%Y"), key
-
-def check_duplicate_statement(wasabi_prefix, user_initials):
-    """Check whether this user already has a statement .docx in this Wasabi package.
-
-    Duplicate key: the user's initials embedded in the filename as '-{INITIALS}-'.
-    cloud_filename format: Statement-{SITE_REF}-{INITIALS}-{datetime}.docx
-
-    Returns (True, existing_key) if a duplicate is found, (False, None) otherwise.
-    A missing Wasabi config or any list error returns (False, None) — safe to proceed.
-    """
-    if not WASABI_ACCESS_KEY or not WASABI_SECRET_KEY or not wasabi_prefix or not user_initials:
-        return False, None
-    try:
-        s3       = _wasabi_client()
-        needle   = f"-{user_initials.upper()}-"
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=WASABI_BUCKET, Prefix=wasabi_prefix):
-            for obj in page.get("Contents", []):
-                fname = obj["Key"].split("/")[-1]
-                if fname.lower().endswith(".docx") and needle in fname.upper():
-                    return True, obj["Key"]
-        return False, None
-    except Exception as e:
-        print(f"Duplicate check error: {e}")
-        return False, None   # fail open — allow upload if check fails
 
 # ── Claude — Witness Statement ────────────────────────────────────────────────
 
@@ -1599,15 +1564,6 @@ function toggleSidebar(){
             </div>
         </div>
         <div id="cloudError" style="display:none;font-size:13px;color:#f85149;padding:12px 24px;border-bottom:1px solid #21262d;"></div>
-        <div id="cloudDuplicate" style="display:none;padding:12px 24px;border-bottom:1px solid #21262d;background:#1e1600;">
-            <div style="display:flex;align-items:flex-start;gap:10px;">
-                <span style="font-size:16px;color:#d29922;flex-shrink:0;">&#9432;</span>
-                <div>
-                    <div style="font-size:13px;color:#d29922;font-weight:600;margin-bottom:3px;">Statement already in cloud package</div>
-                    <div style="font-size:12px;color:#8b949e;line-height:1.5;">Your statement for this package was already uploaded previously — the cloud save was skipped to prevent duplicates. Your local download is unaffected.</div>
-                </div>
-            </div>
-        </div>
 
         <!-- Email section -->
         <div style="padding:20px 24px;border-bottom:1px solid #21262d;">
@@ -1833,7 +1789,6 @@ if (stmtForm) stmtForm.addEventListener('submit', function(e) {
             window._wasabiUploaded = r.headers.get('X-Wasabi-Uploaded') === 'true';
             window._wasabiTs       = r.headers.get('X-Wasabi-Timestamp') || '';
             window._wasabiErr      = r.headers.get('X-Wasabi-Error') || '';
-            window._wasabiSkip     = r.headers.get('X-Wasabi-Skip') || '';
             return r.blob();
         })
         .then(function(blob) {
@@ -1861,9 +1816,6 @@ if (stmtForm) stmtForm.addEventListener('submit', function(e) {
                     document.getElementById('tlSaved').textContent   = window._wasabiTs || '—';
                     tl.style.display = 'block';
                 }
-            } else if (window._wasabiSkip === 'duplicate') {
-                var cd = document.getElementById('cloudDuplicate');
-                if (cd) cd.style.display = 'block';
             } else if (window._wasabiErr) {
                 var ce = document.getElementById('cloudError');
                 if (ce) {
@@ -2272,15 +2224,6 @@ function toggleSidebar(){
             </div>
         </div>
         <div id="foiCloudError" style="display:none;font-size:13px;color:#f85149;margin-bottom:20px;"></div>
-        <div id="foiCloudDuplicate" style="display:none;background:#1e1600;border:1px solid #9e6a03;border-radius:8px;padding:12px 16px;margin-bottom:20px;text-align:left;">
-            <div style="display:flex;align-items:flex-start;gap:10px;">
-                <span style="font-size:16px;color:#d29922;flex-shrink:0;">&#9432;</span>
-                <div>
-                    <div style="font-size:13px;color:#d29922;font-weight:600;margin-bottom:3px;">Record already in cloud package</div>
-                    <div style="font-size:12px;color:#8b949e;line-height:1.5;">Your disclosure record for this package was already uploaded previously — the cloud save was skipped to prevent duplicates. Your local download is unaffected.</div>
-                </div>
-            </div>
-        </div>
         <a href="/" style="background:#21262d;color:#e6edf3;padding:14px 22px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;display:inline-block;">&#8592; Back to Bookmarks</a>
     </div>
     <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px;margin-top:12px;">
@@ -2433,11 +2376,10 @@ if (foiForm) foiForm.addEventListener('submit', function(e) {
         .then(function(r) {
             if (!r.ok) throw new Error('Server error ' + r.status);
             _foiDocToken = r.headers.get('X-Doc-Token');
-            window._foiDelivery       = r.headers.get('X-Delivery') || 'download';
+            window._foiDelivery      = r.headers.get('X-Delivery') || 'download';
             window._foiWasabiUploaded = r.headers.get('X-Wasabi-Uploaded') === 'true';
-            window._foiWasabiTs       = r.headers.get('X-Wasabi-Timestamp') || '';
-            window._foiWasabiErr      = r.headers.get('X-Wasabi-Error') || '';
-            window._foiWasabiSkip     = r.headers.get('X-Wasabi-Skip') || '';
+            window._foiWasabiTs      = r.headers.get('X-Wasabi-Timestamp') || '';
+            window._foiWasabiErr     = r.headers.get('X-Wasabi-Error') || '';
             return r.blob();
         })
         .then(function(blob) {
@@ -2462,13 +2404,10 @@ if (foiForm) foiForm.addEventListener('submit', function(e) {
             if (window._foiWasabiUploaded) {
                 var tl = document.getElementById('foiCloudTimeline');
                 if (tl) {
-                    document.getElementById('foiTlArrived').textContent = _foiWasabiArrived || '—';
+                    document.getElementById('foiTlArrived').textContent = _wasabiArrived || '—';
                     document.getElementById('foiTlSaved').textContent   = window._foiWasabiTs || '—';
                     tl.style.display = 'block';
                 }
-            } else if (window._foiWasabiSkip === 'duplicate') {
-                var cd = document.getElementById('foiCloudDuplicate');
-                if (cd) cd.style.display = 'block';
             } else if (window._foiWasabiErr) {
                 var ce = document.getElementById('foiCloudError');
                 if (ce) {
@@ -2607,8 +2546,7 @@ def _statement_handler(bookmark_id, pipeline):
             safe_bm   = "".join(c if c.isalnum() or c in "-_" else "_" for c in bookmark_name)
             pipeline_tag  = "SYP" if pipeline == "syp" else "RMBC"
             filename       = f"{date_str}_{pipeline_tag}_{safe_name}_{safe_bm}.docx"
-            user_initials  = session.get("initials", "XX")
-            cloud_filename = f"Statement-{SITE_REF}-{user_initials}-{download_time.strftime('%d-%m-%Y-%H-%M')}.docx"
+            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M')}.docx"
             # Save to temp for email feature
             doc_token = str(uuid.uuid4())
             tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
@@ -2616,32 +2554,26 @@ def _statement_handler(bookmark_id, pipeline):
                 f.write(docx_buf.getvalue())
             _TEMP_DOCS[doc_token] = (tmp_path, filename)
             # ── Wasabi upload if delivery includes cloud ──────────────────────
-            wasabi_ts   = ""
-            wasabi_err  = ""
-            wasabi_skip = ""   # "duplicate" if upload skipped for this user
+            wasabi_ts  = ""
+            wasabi_err = ""
             if delivery in ("cloud", "both") and wp:
-                dup_found, _ = check_duplicate_statement(wp, user_initials)
-                if dup_found:
-                    wasabi_skip = "duplicate"
-                else:
-                    try:
-                        docx_buf.seek(0)
-                        wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, cloud_filename)
-                    except Exception as ue:
-                        wasabi_err = str(ue)
-                        print(f"Wasabi upload error: {ue}")
+                try:
+                    docx_buf.seek(0)
+                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, cloud_filename)
+                except Exception as ue:
+                    wasabi_err = str(ue)
+                    print(f"Wasabi upload error: {ue}")
             # ─────────────────────────────────────────────────────────────────
             docx_buf.seek(0)
             resp = send_file(docx_buf, as_attachment=True, download_name=filename,
                 mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            resp.headers["X-Doc-Token"]        = doc_token
-            resp.headers["X-Delivery"]         = delivery
+            resp.headers["X-Doc-Token"]    = doc_token
+            resp.headers["X-Delivery"]     = delivery
             resp.headers["X-Wasabi-Uploaded"]  = "true" if wasabi_ts else "false"
             resp.headers["X-Wasabi-Timestamp"] = wasabi_ts
             resp.headers["X-Wasabi-Error"]     = wasabi_err
-            resp.headers["X-Wasabi-Skip"]      = wasabi_skip
             resp.headers["Access-Control-Expose-Headers"] = (
-                "X-Doc-Token, X-Delivery, X-Wasabi-Uploaded, X-Wasabi-Timestamp, X-Wasabi-Error, X-Wasabi-Skip"
+                "X-Doc-Token, X-Delivery, X-Wasabi-Uploaded, X-Wasabi-Timestamp, X-Wasabi-Error"
             )
             return resp
         except Exception as e:
@@ -2689,28 +2621,22 @@ def foi(bookmark_id):
             date_str  = download_time.strftime("%Y-%m-%d_%H-%M")
             safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in witness_name)
             filename       = f"{date_str}_{safe_name}_FOI_Disclosure.docx"
-            user_initials  = session.get("initials", "XX")
-            cloud_filename = f"Statement-{SITE_REF}-{user_initials}-{download_time.strftime('%d-%m-%Y-%H-%M')}.docx"
+            cloud_filename = f"Statement-{SITE_REF}-{download_time.strftime('%d-%m-%Y-%H-%M')}.docx"
             doc_token = str(uuid.uuid4())
             tmp_path  = os.path.join(tempfile.gettempdir(), f"{doc_token}.docx")
             with open(tmp_path, "wb") as f:
                 f.write(docx_buf.getvalue())
             _TEMP_DOCS[doc_token] = (tmp_path, filename)
             # ── Wasabi upload ─────────────────────────────────────────────────
-            wasabi_ts   = ""
-            wasabi_err  = ""
-            wasabi_skip = ""   # "duplicate" if upload skipped for this user
+            wasabi_ts  = ""
+            wasabi_err = ""
             if delivery in ("cloud", "both") and wp:
-                dup_found, _ = check_duplicate_statement(wp, user_initials)
-                if dup_found:
-                    wasabi_skip = "duplicate"
-                else:
-                    try:
-                        docx_buf.seek(0)
-                        wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, cloud_filename)
-                    except Exception as ue:
-                        wasabi_err = str(ue)
-                        print(f"Wasabi upload error (FOI): {ue}")
+                try:
+                    docx_buf.seek(0)
+                    wasabi_ts, _ = upload_to_wasabi(docx_buf.read(), wp, cloud_filename)
+                except Exception as ue:
+                    wasabi_err = str(ue)
+                    print(f"Wasabi upload error (FOI): {ue}")
             # ─────────────────────────────────────────────────────────────────
             docx_buf.seek(0)
             resp = send_file(docx_buf, as_attachment=True, download_name=filename,
@@ -2720,9 +2646,8 @@ def foi(bookmark_id):
             resp.headers["X-Wasabi-Uploaded"]  = "true" if wasabi_ts else "false"
             resp.headers["X-Wasabi-Timestamp"] = wasabi_ts
             resp.headers["X-Wasabi-Error"]     = wasabi_err
-            resp.headers["X-Wasabi-Skip"]      = wasabi_skip
             resp.headers["Access-Control-Expose-Headers"] = (
-                "X-Doc-Token, X-Delivery, X-Wasabi-Uploaded, X-Wasabi-Timestamp, X-Wasabi-Error, X-Wasabi-Skip"
+                "X-Doc-Token, X-Delivery, X-Wasabi-Uploaded, X-Wasabi-Timestamp, X-Wasabi-Error"
             )
             return resp
         except Exception as e:
