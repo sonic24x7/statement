@@ -1064,12 +1064,29 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:
 .cloud-tag-c{background:#0d2b0d;color:#3fb950;border:1px solid #238636;}
 .cloud-tag-d{background:#2d1f00;color:#d29922;border:1px solid #d29922;}
 .empty{text-align:center;padding:60px;color:#484f58;}
-@media(max-width:600px){
-  .bm{flex-direction:column;align-items:flex-start;}
+@media(max-width:900px){
+  .container{padding:0 12px;}
+  .btn{padding:10px 14px;font-size:13px;}
+  .dur{font-size:14px;}
+}
+@media(max-width:768px){
+  .topbar{padding:10px 14px;}
+  .topbar h1{font-size:13px;}
+  .topbar .right{font-size:12px;}
+  .bm{flex-direction:column;align-items:flex-start;padding:14px 16px;}
   .bm-right{align-items:flex-start;width:100%;}
-  .btn-row{width:100%;}
-  .btn{flex:1;text-align:center;}
-  .sidebar{display:none;}
+  .btn-row{width:100%;gap:8px;}
+  .btn{flex:1;text-align:center;padding:12px 8px;font-size:13px;}
+  .btn-row > div{flex:1;}
+  .btn-row > div .btn{width:100%;}
+  .btn-row > div span{text-align:center;display:block;}
+  .bm-name{font-size:14px;}
+  .bm-desc{white-space:normal;}
+  .page-title{font-size:17px;}
+}
+@media(max-width:480px){
+  .topbar h1{font-size:12px;}
+  .btn{padding:13px 6px;font-size:12px;}
 }
 .sidebar-wrap{position:fixed;right:0;top:50vh;transform:translateY(-50%);z-index:9999;display:flex;align-items:stretch;}
 .sidebar-drawer{background:#161b22;border:1px solid #30363d;border-right:none;border-radius:10px 0 0 10px;width:0;overflow:hidden;opacity:0;transition:width 0.25s ease,opacity 0.2s ease;display:flex;flex-direction:column;justify-content:flex-start;}
@@ -1114,10 +1131,7 @@ function toggleSidebar(){
 }
 </script>
 <div class="topbar">
-    <div>
-        <div class="wordmark">CamScribe</div>
-        <h1>🎥 RMBC CCTV — Evidence Management<span class="site-badge">{{ site_ref }}</span></h1>
-    </div>
+    <h1>🎥 CamScribe — Evidence Management — {{ site_ref }}</h1>
     <div class="right">{{ session.user_name }} · {{ session.user_role }}<a href="/logout">Sign out</a></div>
 </div>
 <div class="container">
