@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v7.2 — remove Flare Ref from SYP; cloud card accents on index; strip Hikvision/NX text; exact clock diff precision)
+cctv_app.py  (v7.3 — RMBC: remove personal handover, casefile fields, crime ref; add casefile helper text)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -1251,7 +1251,7 @@ function toggleSidebar(){
             <div id="ref_fields" style="margin-top:4px;">
                 <div class="row">
                     <div><label>Incident / Crime Name</label><input type="text" name="crime_name" placeholder="e.g. Criminal Damage"></div>
-                    <div><label>Crime Reference Number <span>(if known)</span></label><input type="text" name="crime_number" placeholder="e.g. 22/12345/24"></div>
+                    {% if pipeline == 'syp' %}<div><label>Crime Reference Number <span>(if known)</span></label><input type="text" name="crime_number" placeholder="e.g. 22/12345/24"></div>{% endif %}
                 </div>
                 {% if pipeline != 'syp' %}
                 <div class="row">
@@ -1402,15 +1402,8 @@ function toggleSidebar(){
             </div>
 
             {% else %}
-            <!-- RMBC: Personal Handover | Secure Storage | Case File -->
-            <div class="handover-opts" style="grid-template-columns:1fr 1fr 1fr;">
-                <div class="h-opt" id="opt_person" onclick="setHandover('person')">
-                    <input type="radio" name="handover_type" value="person">
-                    <div class="icon">👷</div>
-                    <div class="title">Personal Handover</div>
-                    <div class="sub">Handed directly to officer</div>
-                    <div style="font-size:10px;color:#484f58;margin-top:6px;line-height:1.4;">For police / criminal investigation, use SYP Statement instead.</div>
-                </div>
+            <!-- RMBC: Secure Storage | Case File -->
+            <div class="handover-opts" style="grid-template-columns:1fr 1fr;">
                 <div class="h-opt active" id="opt_storage" onclick="setHandover('storage')">
                     <input type="radio" name="handover_type" value="storage" checked>
                     <div class="icon">🔒</div>
@@ -1425,14 +1418,10 @@ function toggleSidebar(){
                 </div>
             </div>
 
-            <div id="fields_casefile" style="display:none;margin-top:14px;">
-                <div class="row">
-                    <div><label>Case File Reference</label><input type="text" name="casefile_ref" placeholder="e.g. ENV-2026-001234"></div>
-                    <div>
-                        <label>Case Management System</label>
-                        <input type="text" name="casefile_system" value="Flare" readonly style="color:#484f58;cursor:not-allowed;">
-                    </div>
-                </div>
+            <div id="fields_casefile" style="display:none;margin-top:12px;">
+                <p style="font-size:13px;color:#8b949e;padding:12px;background:#0d1117;border-radius:6px;border:1px solid #21262d;">
+                    📁 The exhibit will be recorded as stored on the Flare case management system for internal council use.
+                </p>
             </div>
             {% endif %}
 
