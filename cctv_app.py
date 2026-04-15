@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v7.3 — RMBC: remove personal handover, casefile fields, crime ref; add casefile helper text)
+cctv_app.py  (v7.4 — index: prominent cloud status pill on every bookmark card)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -991,14 +991,20 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:
 .page-sub{color:#8b949e;font-size:13px;margin-bottom:20px;}
 .bm{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 20px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;border-left:4px solid #30363d;gap:12px;flex-wrap:wrap;}
 .bm:hover{border-color:#58a6ff;border-left-color:#58a6ff;}
-.bm-cloud{background:#0b1f12;border-color:#238636;border-left-color:#3fb950;}
-.bm-cloud:hover{border-color:#3fb950;border-left-color:#3fb950;}
-.bm-deferred{background:#1a1200;border-color:#d29922;border-left-color:#d29922;}
-.bm-deferred:hover{border-color:#e3b341;border-left-color:#e3b341;}
+.bm-cloud{background:#081910;border-color:#2ea043;border-left:5px solid #3fb950;}
+.bm-cloud .bm-name{color:#cae8ca;}
+.bm-cloud:hover{border-color:#3fb950;}
+.bm-deferred{background:#1c1400;border-color:#9e6a03;border-left:5px solid #d29922;}
+.bm-deferred .bm-name{color:#e8c87a;}
+.bm-deferred:hover{border-color:#e3b341;}
 .bm-info{flex:1;min-width:0;}
-.bm-name{font-size:15px;font-weight:600;margin-bottom:3px;}
+.bm-name{font-size:15px;font-weight:600;margin-bottom:4px;}
 .bm-desc{font-size:13px;color:#8b949e;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .bm-time{font-size:11px;color:#484f58;font-family:'DM Mono',monospace;}
+.bm-status{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:6px;}
+.bm-status-cloud{background:#0d2b0d;color:#3fb950;border:1px solid #238636;}
+.bm-status-deferred{background:#2d1f00;color:#d29922;border:1px solid #9e6a03;}
+.bm-status-none{background:#1c2128;color:#484f58;border:1px solid #30363d;}
 .bm-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;}
 .dur{font-size:13px;font-weight:700;color:#58a6ff;font-family:'DM Mono',monospace;}
 .btn-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
@@ -1074,7 +1080,14 @@ function toggleSidebar(){
         {% for bm in bookmarks %}
         <div class="bm{% if '[C]' in (bm.name or '').upper() %} bm-cloud{% elif '[D]' in (bm.name or '').upper() %} bm-deferred{% endif %}">
             <div class="bm-info">
-                <div class="bm-name">{{ bm.name or "(No name)" }}{% if '[C]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-c">&#9729; Cloud</span>{% elif '[D]' in (bm.name or '').upper() %}<span class="cloud-tag cloud-tag-d">&#8987; Deferred</span>{% endif %}</div>
+                {% if '[C]' in (bm.name or '').upper() %}
+                <div class="bm-status bm-status-cloud">&#9729; Cloud — footage queued for Wasabi</div>
+                {% elif '[D]' in (bm.name or '').upper() %}
+                <div class="bm-status bm-status-deferred">&#8987; Deferred — scheduled for overnight upload</div>
+                {% else %}
+                <div class="bm-status bm-status-none">&#11015; No cloud tag — download only</div>
+                {% endif %}
+                <div class="bm-name">{{ bm.name or "(No name)" }}</div>
                 <div class="bm-desc">{{ bm.description or "No description" }}</div>
                 <div class="bm-time">{{ bm.start_fmt }} → {{ bm.end_fmt }}</div>
             </div>
