@@ -1003,7 +1003,7 @@ button:hover{background:#2ea043;}
 <div class="logo">
     <div class="icon">🎥</div>
     <span class="badge">OFFICIAL SENSITIVE</span>
-    <h1>RMBC CCTV</h1>
+    <h1>CamScribe</h1>
     <p>Evidence Management System</p>
 </div>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
@@ -1131,7 +1131,7 @@ function toggleSidebar(){
 }
 </script>
 <div class="topbar">
-    <h1>🎥 CamScribe — Evidence Management — {{ site_ref }}</h1>
+    <h1>🎥 CamScribe &copy; 2026 — Evidence Management — {{ site_ref }}</h1>
     <div class="right">{{ session.user_name }} · {{ session.user_role }}<a href="/logout">Sign out</a></div>
 </div>
 <div class="container">
