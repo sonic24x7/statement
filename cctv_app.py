@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v7.4 — index: prominent cloud status pill on every bookmark card)
+cctv_app.py  (v7.5 — RMBC storage wording; FOI clock moved to section 8; CamScribe wordmark on all pages)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -394,15 +394,23 @@ def generate_statement(bm, form, download_time):
 
     else:
         # Secure storage locker
-        handover = (
-            f"Exhibit {exhibit_ref} has been placed into the secure CCTV storage locker at {secure_store}, "
-            f"awaiting collection. Handover details to be completed on collection:\n"
-            f"- Officer name: ______________________\n"
-            f"- Officers station: ______________________\n"
-            f"- Collar / warrant number: ______________________\n"
-            f"- Date and time of collection: __ / __ / _____ at __ : __ Hrs\n"
-            f"- Location of handover: ______________________"
-        )
+        if form.get("_pipeline") == "rmbc":
+            # RMBC is internal-only — no police collection details
+            handover = (
+                f"Exhibit {exhibit_ref} has been placed into the secure CCTV storage locker at {secure_store}, "
+                f"pending internal retrieval."
+            )
+        else:
+            # SYP — police collection details required
+            handover = (
+                f"Exhibit {exhibit_ref} has been placed into the secure CCTV storage locker at {secure_store}, "
+                f"awaiting collection. Handover details to be completed on collection:\n"
+                f"- Officer name: ______________________\n"
+                f"- Officers station: ______________________\n"
+                f"- Collar / warrant number: ______________________\n"
+                f"- Date and time of collection: __ / __ / _____ at __ : __ Hrs\n"
+                f"- Location of handover: ______________________"
+            )
 
     prompt = f"""You are a transcription tool. Your only job is to assemble the sections below into a flowing MG11 witness statement. You do NOT rewrite, rephrase, improve, or add to any of the provided text.
 
@@ -985,6 +993,7 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:
 .topbar h1{font-size:15px;font-weight:700;}
 .topbar .right{font-size:13px;color:#8b949e;}
 .topbar a{color:#58a6ff;text-decoration:none;margin-left:12px;font-size:13px;}
+.wordmark{font-size:10px;font-weight:700;letter-spacing:3px;color:#58a6ff;font-family:'DM Mono',monospace;text-transform:uppercase;line-height:1;margin-bottom:3px;}
 .site-badge{background:#1f2937;color:#58a6ff;padding:2px 8px;border-radius:4px;font-size:11px;font-family:'DM Mono',monospace;margin-left:8px;}
 .container{max-width:900px;margin:24px auto;padding:0 16px;}
 .page-title{font-size:20px;font-weight:700;margin-bottom:4px;}
@@ -1070,7 +1079,10 @@ function toggleSidebar(){
 }
 </script>
 <div class="topbar">
-    <h1>🎥 RMBC CCTV — Evidence Management<span class="site-badge">{{ site_ref }}</span></h1>
+    <div>
+        <div class="wordmark">CamScribe</div>
+        <h1>🎥 RMBC CCTV — Evidence Management<span class="site-badge">{{ site_ref }}</span></h1>
+    </div>
     <div class="right">{{ session.user_name }} · {{ session.user_role }}<a href="/logout">Sign out</a></div>
 </div>
 <div class="container">
@@ -1125,6 +1137,7 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;color:#e6edf3;}
 .topbar{background:#161b22;border-bottom:1px solid #30363d;padding:14px 30px;display:flex;justify-content:space-between;align-items:center;}
 .topbar h1{font-size:16px;font-weight:700;}
 .topbar a{color:#58a6ff;text-decoration:none;font-size:13px;margin-left:16px;}
+.wordmark{font-size:10px;font-weight:700;letter-spacing:3px;color:#58a6ff;font-family:'DM Mono',monospace;text-transform:uppercase;line-height:1;margin-bottom:3px;}
 .container{max-width:820px;margin:30px auto;padding:0 20px 80px;}
 .clock-box{background:#0d1117;border:1px solid #238636;border-radius:10px;padding:20px 24px;margin-bottom:24px;text-align:center;}
 .clock-label{font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;}
@@ -1213,7 +1226,10 @@ function toggleSidebar(){
 }
 </script>
 <div class="topbar">
-    <h1>🎥 RMBC CCTV — {% if pipeline == 'syp' %}SYP Witness Statement{% else %}RMBC Witness Statement{% endif %}</h1>
+    <div>
+        <div class="wordmark">CamScribe</div>
+        <h1>🎥 RMBC CCTV — {% if pipeline == 'syp' %}SYP Witness Statement{% else %}RMBC Witness Statement{% endif %}</h1>
+    </div>
     <div><a href="/">← Bookmarks</a><a href="/logout">Sign out</a></div>
 </div>
 <div class="container">
@@ -1861,6 +1877,7 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;color:#e6edf3;}
 .topbar{background:#161b22;border-bottom:1px solid #30363d;padding:14px 30px;display:flex;justify-content:space-between;align-items:center;}
 .topbar h1{font-size:16px;font-weight:700;}
 .topbar a{color:#58a6ff;text-decoration:none;font-size:13px;margin-left:16px;}
+.wordmark{font-size:10px;font-weight:700;letter-spacing:3px;color:#58a6ff;font-family:'DM Mono',monospace;text-transform:uppercase;line-height:1;margin-bottom:3px;}
 .container{max-width:820px;margin:30px auto;padding:0 20px 80px;}
 .incident{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 22px;margin-bottom:20px;border-left:3px solid #8a5cf6;}
 .incident h3{font-size:13px;font-weight:700;color:#8a5cf6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;}
@@ -1944,7 +1961,10 @@ function toggleSidebar(){
 }
 </script>
 <div class="topbar">
-    <h1>📋 RMBC CCTV — Disclosure Record</h1>
+    <div>
+        <div class="wordmark">CamScribe</div>
+        <h1>📋 RMBC CCTV — Disclosure Record</h1>
+    </div>
     <div><a href="/">← Bookmarks</a><a href="/logout">Sign out</a></div>
 </div>
 <div class="container">
@@ -1952,29 +1972,6 @@ function toggleSidebar(){
     <div class="incident">
         <h3>📋 Footage: {{ bm.name }}</h3>
         <p>Period &nbsp;&nbsp;: {{ bm.start_fmt }} → {{ bm.end_fmt }}<br>Duration : {{ bm.duration_fmt }}<br>System &nbsp;&nbsp;: {{ site_ref }}</p>
-    </div>
-
-    <!-- Clock comparison — mandatory on all forms -->
-    <div style="background:#0d1117;border:1px solid #6e40c9;border-radius:10px;padding:20px 24px;margin-bottom:20px;text-align:center;">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center;">
-            <div>
-                <div style="font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;">UK Official Time (Browser)</div>
-                <div style="font-size:17px;font-weight:600;color:#8b949e;margin-bottom:6px;font-family:'DM Mono',monospace;" id="foiLiveDate">Loading...</div>
-                <div style="font-size:40px;font-weight:700;color:#8a5cf6;letter-spacing:3px;font-family:'DM Mono',monospace;line-height:1;" id="foiLiveTime">--:--:--</div>
-                <div style="font-size:11px;color:#484f58;margin-top:6px;font-family:'DM Mono',monospace;" id="foiTzLabel">Loading...</div>
-            </div>
-            <div>
-                <div style="font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;">NVR Server Time</div>
-                <div style="font-size:17px;font-weight:600;color:#8b949e;margin-bottom:6px;font-family:'DM Mono',monospace;" id="foiServerDate">Loading...</div>
-                <div style="font-size:40px;font-weight:700;letter-spacing:3px;font-family:'DM Mono',monospace;line-height:1;">
-                    <span id="foiServerHHMM" style="color:#8a5cf6;">--:--:</span><span id="foiServerSS" style="color:#8a5cf6;">--</span>
-                </div>
-                <div style="font-size:11px;color:#484f58;margin-top:6px;font-family:'DM Mono',monospace;" id="foiServerDiff">Fetching...</div>
-            </div>
-        </div>
-        <button type="button" onclick="foiUseTheseTimes()" style="margin-top:16px;background:#6e40c9;color:white;border:none;border-radius:6px;padding:10px 24px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
-            Use These Times for Clock Check
-        </button>
     </div>
 
     <form id="foiForm" method="POST">
@@ -2108,6 +2105,27 @@ function toggleSidebar(){
         <!-- 8: Time Verification (optional) -->
         <div class="green-section">
             <h3>🕐 Section 8 · Time Synchronisation Verification <span>optional</span></h3>
+            <div style="background:#0d1117;border:1px solid #2a1a4a;border-radius:8px;padding:16px 20px;margin-bottom:16px;text-align:center;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center;">
+                    <div>
+                        <div style="font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;">UK Official Time (Browser)</div>
+                        <div style="font-size:15px;font-weight:600;color:#8b949e;margin-bottom:4px;font-family:'DM Mono',monospace;" id="foiLiveDate">Loading...</div>
+                        <div style="font-size:36px;font-weight:700;color:#8a5cf6;letter-spacing:3px;font-family:'DM Mono',monospace;line-height:1;" id="foiLiveTime">--:--:--</div>
+                        <div style="font-size:11px;color:#484f58;margin-top:6px;font-family:'DM Mono',monospace;" id="foiTzLabel">Loading...</div>
+                    </div>
+                    <div>
+                        <div style="font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-family:'DM Mono',monospace;">NVR Server Time</div>
+                        <div style="font-size:15px;font-weight:600;color:#8b949e;margin-bottom:4px;font-family:'DM Mono',monospace;" id="foiServerDate">Loading...</div>
+                        <div style="font-size:36px;font-weight:700;letter-spacing:3px;font-family:'DM Mono',monospace;line-height:1;">
+                            <span id="foiServerHHMM" style="color:#8a5cf6;">--:--:</span><span id="foiServerSS" style="color:#8a5cf6;">--</span>
+                        </div>
+                        <div style="font-size:11px;color:#484f58;margin-top:6px;font-family:'DM Mono',monospace;" id="foiServerDiff">Fetching...</div>
+                    </div>
+                </div>
+                <button type="button" onclick="foiUseTheseTimes()" style="margin-top:14px;background:#6e40c9;color:white;border:none;border-radius:6px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;">
+                    Use These Times for Clock Check
+                </button>
+            </div>
             <div class="toggle-row">
                 <input type="checkbox" id="timeVerifyCheck" name="time_verified" value="yes" onchange="toggleTimeVerify(this)">
                 <label for="timeVerifyCheck">Time verification was performed against BT Speaking Clock</label>
@@ -2502,6 +2520,7 @@ def _statement_handler(bookmark_id, pipeline):
 
     if request.method == "POST":
         form_data     = request.form.to_dict()
+        form_data["_pipeline"] = pipeline          # passed to generate_statement for pipeline-aware wording
         delivery      = form_data.get("delivery", "download")  # download | cloud | both
         wp            = form_data.get("wasabi_prefix", "")
         download_time = datetime.now(timezone.utc)
