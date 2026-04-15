@@ -1014,7 +1014,7 @@ button:hover{background:#2ea043;}
     <input type="password" name="password" required>
     <button type="submit">Sign In →</button>
 </form>
-<div class="footer">Rotherham Metropolitan Borough Council · CCTV Evidence Unit · {{ site_ref }}</div>
+<div class="footer">Rotherham Metropolitan Borough Council · Evidence Management System</div>
 </div></body></html>"""
 
 BOOKMARKS_HTML = """<!DOCTYPE html>
