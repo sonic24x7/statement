@@ -1,5 +1,5 @@
 """
-cctv_app.py  (v7.5 — RMBC storage wording; FOI clock moved to section 8; CamScribe wordmark on all pages)
+cctv_app.py  (v7.6 — index page: real Wasabi check per bookmark on load; card status driven by actual cloud presence)
 ================================================
 Changes from v6.4:
 - Wasabi cloud upload integration across all 3 pipelines (SYP, RMBC, FOI)
@@ -1003,16 +1003,16 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:
 .bm-cloud{background:#081910;border-color:#2ea043;border-left:5px solid #3fb950;}
 .bm-cloud .bm-name{color:#cae8ca;}
 .bm-cloud:hover{border-color:#3fb950;}
-.bm-deferred{background:#1c1400;border-color:#9e6a03;border-left:5px solid #d29922;}
-.bm-deferred .bm-name{color:#e8c87a;}
-.bm-deferred:hover{border-color:#e3b341;}
+.bm-pending{background:#191000;border-color:#9e6a03;border-left:5px solid #d29922;}
+.bm-pending .bm-name{color:#e8c87a;}
+.bm-pending:hover{border-color:#e3b341;}
 .bm-info{flex:1;min-width:0;}
 .bm-name{font-size:15px;font-weight:600;margin-bottom:4px;}
 .bm-desc{font-size:13px;color:#8b949e;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .bm-time{font-size:11px;color:#484f58;font-family:'DM Mono',monospace;}
 .bm-status{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:6px;}
-.bm-status-cloud{background:#0d2b0d;color:#3fb950;border:1px solid #238636;}
-.bm-status-deferred{background:#2d1f00;color:#d29922;border:1px solid #9e6a03;}
+.bm-status-confirmed{background:#0d2b0d;color:#3fb950;border:1px solid #238636;}
+.bm-status-pending{background:#2d1f00;color:#d29922;border:1px solid #9e6a03;}
 .bm-status-none{background:#1c2128;color:#484f58;border:1px solid #30363d;}
 .bm-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;}
 .dur{font-size:13px;font-weight:700;color:#58a6ff;font-family:'DM Mono',monospace;}
@@ -1090,12 +1090,14 @@ function toggleSidebar(){
     <div class="page-sub">Choose a bookmark to generate a Witness Statement or FOI Disclosure Record.</div>
     {% if bookmarks %}
         {% for bm in bookmarks %}
-        <div class="bm{% if '[C]' in (bm.name or '').upper() %} bm-cloud{% elif '[D]' in (bm.name or '').upper() %} bm-deferred{% endif %}">
+        <div class="bm{% if bm.wasabi_confirmed %} bm-cloud{% elif '[C]' in (bm.name or '').upper() or '[D]' in (bm.name or '').upper() %} bm-pending{% endif %}">
             <div class="bm-info">
-                {% if '[C]' in (bm.name or '').upper() %}
-                <div class="bm-status bm-status-cloud">&#9729; Cloud — footage queued for Wasabi</div>
+                {% if bm.wasabi_confirmed %}
+                <div class="bm-status bm-status-confirmed">&#10003; In Wasabi — footage confirmed{% if bm.wasabi_arrived %} · {{ bm.wasabi_arrived }}{% endif %}</div>
+                {% elif '[C]' in (bm.name or '').upper() %}
+                <div class="bm-status bm-status-pending">&#9729; Cloud bookmark — not yet in Wasabi</div>
                 {% elif '[D]' in (bm.name or '').upper() %}
-                <div class="bm-status bm-status-deferred">&#8987; Deferred — scheduled for overnight upload</div>
+                <div class="bm-status bm-status-pending">&#8987; Deferred — scheduled for overnight upload</div>
                 {% else %}
                 <div class="bm-status bm-status-none">&#11015; No cloud tag — download only</div>
                 {% endif %}
@@ -2482,7 +2484,17 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    return render_template_string(BOOKMARKS_HTML, bookmarks=get_bookmarks(), session=session, site_ref=SITE_REF)
+    bookmarks = get_bookmarks()
+    # Run Wasabi check for every bookmark so the index page shows real cloud status
+    for bm in bookmarks:
+        try:
+            found, _, arrived = check_wasabi_footage(bm.get("name", ""))
+            bm["wasabi_confirmed"] = found
+            bm["wasabi_arrived"]   = arrived or ""
+        except Exception:
+            bm["wasabi_confirmed"] = False
+            bm["wasabi_arrived"]   = ""
+    return render_template_string(BOOKMARKS_HTML, bookmarks=bookmarks, session=session, site_ref=SITE_REF)
 
 @app.route("/form/<int:bookmark_id>")
 @login_required
