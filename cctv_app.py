@@ -997,7 +997,7 @@ input:focus{outline:none;border-color:#58a6ff;}
 button{width:100%;padding:12px;background:#238636;color:white;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;margin-top:20px;font-family:'DM Sans',sans-serif;}
 button:hover{background:#2ea043;}
 .error{background:#3d1a1a;border:1px solid #f85149;color:#f85149;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px;}
-.footer{text-align:center;margin-top:20px;font-size:11px;color:#484f58;}
+.footer{text-align:center;margin-top:20px;font-size:11px;color:#484f58;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 </style></head>
 <body><div class="card">
 <div class="logo">
