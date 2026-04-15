@@ -1143,7 +1143,7 @@ function toggleSidebar(){
                 {% if bm.wasabi_confirmed %}
                 <div class="bm-status bm-status-confirmed">&#10003; Cloud Enabled</div>
                 {% elif '[C]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %}
-                <div class="bm-status bm-status-pending">&#9729; Cloud bookmark — not yet in Wasabi</div>
+                <div class="bm-status bm-status-pending">&#9729; Cloud bookmark — uploading&hellip;</div>
                 {% elif '[D]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %}
                 <div class="bm-status bm-status-pending">&#8987; Deferred — scheduled for overnight upload</div>
                 {% else %}
