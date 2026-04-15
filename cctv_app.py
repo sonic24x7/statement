@@ -1099,7 +1099,7 @@ function toggleSidebar(){
                 {% elif '[D]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %}
                 <div class="bm-status bm-status-pending">&#8987; Deferred — scheduled for overnight upload</div>
                 {% else %}
-                <div class="bm-status bm-status-none">&#11015; No cloud tag — download only</div>
+                <div class="bm-status bm-status-none">&#10007; Local Download Only</div>
                 {% endif %}
                 <div class="bm-name">{{ bm.name or "(No name)" }}</div>
                 <div class="bm-desc">{{ bm.description or "No description" }}</div>
@@ -1110,15 +1110,15 @@ function toggleSidebar(){
                 <div class="btn-row">
                     <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
                         <a href="/syp/{{ bm.record_id }}" class="btn btn-syp">SYP Statement</a>
-                        <span style="font-size:10px;color:#484f58;">Police investigation — includes DEMS</span>
+                        <span style="font-size:10px;color:#484f58;">Police Investigations</span>
                     </div>
                     <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
                         <a href="/rmbc/{{ bm.record_id }}" class="btn btn-rmbc">RMBC Statement</a>
-                        <span style="font-size:10px;color:#484f58;">Internal use</span>
+                        <span style="font-size:10px;color:#484f58;">RMBC Investigations</span>
                     </div>
                     <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
                         <a href="/foi/{{ bm.record_id }}" class="btn btn-foi">FOI Record</a>
-                        <span style="font-size:10px;color:#484f58;">Public, solicitor, or insurance disclosure</span>
+                        <span style="font-size:10px;color:#484f58;">Public Inquiries</span>
                     </div>
                 </div>
             </div>
