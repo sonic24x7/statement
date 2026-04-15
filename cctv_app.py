@@ -1264,8 +1264,7 @@ function toggleSidebar(){
 </script>
 <div class="topbar">
     <div>
-        <div class="wordmark">CamScribe</div>
-        <h1>🎥 RMBC CCTV — {% if pipeline == 'syp' %}SYP Witness Statement{% else %}RMBC Witness Statement{% endif %}</h1>
+        <h1>CamScribe — {% if pipeline == 'syp' %}SYP Automated Statement Generator{% else %}RMBC Automated Statement Generator{% endif %}</h1>
     </div>
     <div><a href="/">← Bookmarks</a><a href="/logout">Sign out</a></div>
 </div>
