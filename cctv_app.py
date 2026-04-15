@@ -1052,12 +1052,12 @@ body{font-family:'DM Sans',sans-serif;background:#0d1117;min-height:100vh;color:
 .dur{font-size:16px;font-weight:700;color:#58a6ff;font-family:'DM Mono',monospace;}
 .btn-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
 .btn{padding:9px 18px;border-radius:7px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;white-space:nowrap;}
-.btn-syp{background:#238636;color:white;}
-.btn-syp:hover{background:#2ea043;}
-.btn-rmbc{background:#1f4068;color:#58a6ff;border:1px solid #30363d;}
-.btn-rmbc:hover{background:#2a5a8a;color:white;}
-.btn-foi{background:#2a1a4a;color:#8a5cf6;border:1px solid #6e40c9;}
-.btn-foi:hover{background:#6e40c9;color:white;}
+.btn-syp{background:#2d333b;color:#cdd9e5;border:1px solid #444c56;}
+.btn-syp:hover{background:#373e47;color:#e6edf3;}
+.btn-rmbc{background:#2d333b;color:#cdd9e5;border:1px solid #444c56;}
+.btn-rmbc:hover{background:#373e47;color:#e6edf3;}
+.btn-foi{background:#2d333b;color:#cdd9e5;border:1px solid #444c56;}
+.btn-foi:hover{background:#373e47;color:#e6edf3;}
 .id-badge{background:#1f2937;color:#484f58;padding:2px 6px;border-radius:4px;font-size:10px;font-family:'DM Mono',monospace;margin-left:6px;}
 .cloud-tag{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;font-family:'DM Mono',monospace;margin-left:6px;vertical-align:middle;}
 .cloud-tag-c{background:#0d2b0d;color:#3fb950;border:1px solid #238636;}
