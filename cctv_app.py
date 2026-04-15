@@ -1093,7 +1093,7 @@ function toggleSidebar(){
         <div class="bm{% if bm.wasabi_confirmed %} bm-cloud{% elif '[C]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() or '[D]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %} bm-pending{% endif %}">
             <div class="bm-info">
                 {% if bm.wasabi_confirmed %}
-                <div class="bm-status bm-status-confirmed">&#10003; In Wasabi — footage confirmed{% if bm.wasabi_arrived %} · {{ bm.wasabi_arrived }}{% endif %}</div>
+                <div class="bm-status bm-status-confirmed">&#10003; Cloud Enabled</div>
                 {% elif '[C]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %}
                 <div class="bm-status bm-status-pending">&#9729; Cloud bookmark — not yet in Wasabi</div>
                 {% elif '[D]' in ((bm.name or '') + ' ' + (bm.description or '')).upper() %}
